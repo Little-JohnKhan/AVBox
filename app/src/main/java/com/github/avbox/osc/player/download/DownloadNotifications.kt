@@ -173,7 +173,7 @@ class DownloadForegroundService : Service() {
             var total = 0L
             var percentSum = 0f
             for (d in active) {
-                downloaded += d.downloadedBytes
+                downloaded += d.bytesDownloaded
                 total += if (d.contentLength > 0) d.contentLength else 0L
                 percentSum += if (d.percentDownloaded > 0f) d.percentDownloaded else 0f
             }

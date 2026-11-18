@@ -29,6 +29,10 @@ data class DownloadRow(
  */
 object DownloadRepository {
 
+    /** media3 1.11 只留了 STOP_REASON_NONE，暂停用任意非 0 值表达 */
+    private const val STOP_REASON_USER = 1
+
+
     /** 入队。回调在主线程。 */
     fun enqueue(context: Context, item: DownloadItem, onDone: (Boolean, String?) -> Unit) {
         DownloadMetaStore.put(item)
@@ -37,7 +41,7 @@ object DownloadRepository {
             item = item,
             onReady = { request: DownloadRequest ->
                 try {
-                    DownloadStore.get(context).enqueue(request)
+                    DownloadStore.get(context).addDownload(request)
                     DownloadNotifications.refresh(context)
                     AppLog.i("echo-download-enqueue: id=" + item.id + " name=" + item.vodName + " ep=" + item.episodeName)
                     onDone(true, null)
@@ -74,7 +78,7 @@ object DownloadRepository {
                 item = item,
                 state = d.state,
                 percent = d.percentDownloaded,
-                downloadedBytes = d.downloadedBytes,
+                downloadedBytes = d.bytesDownloaded,
                 totalBytes = d.contentLength,
                 stopReason = d.stopReason,
                 failureReason = d.failureReason,
@@ -85,7 +89,7 @@ object DownloadRepository {
     suspend fun pause(context: Context, id: String) {
         withContext(Dispatchers.Main) {
             try {
-                DownloadStore.get(context).pauseDownload(id)
+                DownloadStore.get(context).setStopReason(id, STOP_REASON_USER)
             } catch (th: Throwable) {
                 AppLog.e("DownloadRepository", "pause failed", th)
             }
@@ -95,7 +99,7 @@ object DownloadRepository {
     suspend fun resume(context: Context, id: String) {
         withContext(Dispatchers.Main) {
             try {
-                DownloadStore.get(context).resumeDownload(id)
+                DownloadStore.get(context).setStopReason(id, Download.STOP_REASON_NONE)
                 DownloadNotifications.refresh(context)
             } catch (th: Throwable) {
                 AppLog.e("DownloadRepository", "resume failed", th)

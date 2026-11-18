@@ -13,6 +13,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * 下载管理器单例。
  *
  * 全进程只能有一个，因为底下的 SimpleCache 同一目录不允许被打开两次。
+ *
+ * media3 1.11 的构造器需要显式传 upstreamFactory（下载分片用），
+ * 并注意新建出来的 DownloadManager 默认是「全局暂停」状态，必须 resumeDownloads() 才会真正开始。
  */
 object DownloadStore {
 
@@ -41,14 +44,20 @@ object DownloadStore {
             appContext,
             DownloadCache.database(appContext),
             DownloadCache.get(appContext),
+            DownloadDataSourceFactory,
             executor,
         )
+        created.resumeDownloads()
         manager = created
         AppLog.i("echo-download-manager-ready")
         return created
     }
 
-    fun setListener(context: Context, listener: DownloadManager.Listener?) {
+    fun addListener(context: Context, listener: DownloadManager.Listener) {
         get(context).addListener(listener)
+    }
+
+    fun removeListener(context: Context, listener: DownloadManager.Listener) {
+        get(context).removeListener(listener)
     }
 }
