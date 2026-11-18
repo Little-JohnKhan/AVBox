@@ -133,12 +133,18 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
             DownloadRowCard(
                 row = row,
                 onPlay = {
-                    context.jumpToDetail(
-                        id = row.item.vodId,
-                        sourceKey = row.item.flag,
-                        title = row.item.vodName,
-                        picture = row.item.poster,
-                    )
+                    // 本地文件在就直接起本地播放页（断网也能播），否则回退到详情页
+                    val local = DownloadRepository.publicFileOf(context, row.item.id)
+                    if (!local.isNullOrEmpty()) {
+                        com.github.avbox.osc.ui.LocalPlayActivity.start(context, local)
+                    } else {
+                        context.jumpToDetail(
+                            id = row.item.vodId,
+                            sourceKey = row.item.flag,
+                            title = row.item.vodName,
+                            picture = row.item.poster,
+                        )
+                    }
                 },
                 onPause = { scope.launch { DownloadRepository.pause(context, row.item.id) } },
                 onResume = { scope.launch { DownloadRepository.resume(context, row.item.id) } },
