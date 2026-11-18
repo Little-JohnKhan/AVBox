@@ -4,6 +4,7 @@ import com.github.avbox.osc.net.SuperParse
 import com.github.avbox.osc.util.AppLog
 import com.github.avbox.osc.util.LocalAddress
 import com.github.avbox.osc.util.M3u8Purifier
+import com.github.avbox.osc.util.PurifyStats
 
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -190,6 +191,7 @@ object StreamProxy {
         } else {
             AppLog.i("echo-purify-skip: " + report.toString())
         }
+        PurifyStats.record(report)
 
         val lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
         val sb = StringBuilder()

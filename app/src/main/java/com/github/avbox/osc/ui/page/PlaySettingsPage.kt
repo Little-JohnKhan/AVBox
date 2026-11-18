@@ -20,6 +20,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.github.avbox.osc.R
+import com.github.avbox.osc.player.engine.PurifyProxy
+import com.github.avbox.osc.util.PurifyStats
 import com.github.avbox.osc.player.BasePlayerView
 import com.github.avbox.osc.player.PlaybackService
 import com.github.avbox.osc.player.controller.PlayerTextFormat
@@ -199,6 +201,24 @@ fun PlaySettingsScreen(onNavigateBack: () -> Unit) {
                         subtitle = stringResource(R.string.settings_music_page_subtitle),
                         checked = UiSettingsState.config.musicAutoOpenPage,
                         onCheckedChange = { UiSettingsState.musicAutoOpenPage = it },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(28.dp))
+
+            SettingsGroup(title = "净化") {
+                SettingsCard(SettingsCardPosition.SINGLE) {
+                    var purifyOn by remember { mutableStateOf(PurifyProxy.enabled()) }
+                    SettingsSwitchRow(
+                        title = "剔除广告分片",
+                        leadingIconRes = R.drawable.ic_play_tunnel,
+                        subtitle = remember { PurifyStats.summary() },
+                        checked = purifyOn,
+                        onCheckedChange = { checked ->
+                            PurifyProxy.setEnabled(checked)
+                            purifyOn = checked
+                        },
                     )
                 }
             }

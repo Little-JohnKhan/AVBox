@@ -40,6 +40,16 @@ object PurifyProxy {
         }
     }
 
+    /** 设置页开关调用；写失败只记日志，不打断交互 */
+    fun setEnabled(value: Boolean) {
+        try {
+            KV.put(KEY_ENABLED, value)
+            AppLog.i("echo-purify-switch: $value")
+        } catch (th: Throwable) {
+            AppLog.e("PurifyProxy", "setEnabled failed", th)
+        }
+    }
+
     /**
      * 需要净化代理就返回包装后的地址，否则原样返回。
      * 任何一步不确定都退回原地址——宁可放广告，也不能把能播的源弄成黑屏。
