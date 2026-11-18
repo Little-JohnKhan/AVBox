@@ -129,11 +129,14 @@ class DownloadForegroundService : Service() {
                 download: Download,
                 finalException: Exception?,
             ) {
-                pushState()
+                if (download.state == Download.STATE_COMPLETED) {
+                    DownloadLibrary.refreshAsync(this@DownloadForegroundService)
+                }
+                scope.launch { pushStateNow() }
             }
 
             override fun onDownloadRemoved(downloadManager: DownloadManager, download: Download) {
-                pushState()
+                scope.launch { pushStateNow() }
             }
         }
         listener = l
