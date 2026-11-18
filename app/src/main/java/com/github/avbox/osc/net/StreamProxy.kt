@@ -267,7 +267,7 @@ object StreamProxy {
         var n = 0
         for (line in content.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
             val s = line.trim { it <= ' ' }
-            if (s.isNotEmpty() && s.charAt(0) != '#') n++
+            if (s.isNotEmpty() && s[0] != '#') n++
         }
         return n
     }
