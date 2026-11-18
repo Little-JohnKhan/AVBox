@@ -3,6 +3,7 @@ package com.github.avbox.osc.player.download
 import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.offline.DownloadHelper
@@ -84,10 +85,28 @@ object DownloadTasks {
         helper.prepare(object : DownloadHelper.Callback {
             override fun onPrepared(prepared: DownloadHelper, tracksInfoAvailable: Boolean) {
                 try {
+                    // HLS / DASH 这类非 progressive 源必须显式选轨，
+                    // 否则 getDownloadRequest 产出的 streamKeys 是空的，最终下载出 0 字节的空壳。
+                    if (tracksInfoAvailable) {
+                        val periods = prepared.periodCount
+                        for (i in 0 until periods) {
+                            try {
+                                prepared.addTrackSelection(
+                                    i,
+                                    TrackSelectionParameters.DEFAULT_WITHOUT_CONTEXT,
+                                )
+                            } catch (ignored: Throwable) {
+                                // progressive 源不需要选轨，忽略
+                            }
+                        }
+                    }
                     val request = prepared.getDownloadRequest(item.id, null)
                     AppLog.i(
-                        "echo-download-prepared: id=" + item.id + " url=" + playUrl +
-                            " bytes=" + request.data.size,
+                        "echo-download-prepared: id=" + item.id +
+                            " tracksAvailable=" + tracksInfoAvailable +
+                            " periods=" + prepared.periodCount +
+                            " streamKeys=" + request.streamKeys.size +
+                            " url=" + playUrl,
                     )
                     onReady(request)
                 } catch (th: Throwable) {

@@ -139,6 +139,12 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
                 },
                 onPause = { scope.launch { DownloadRepository.pause(context, row.item.id) } },
                 onResume = { scope.launch { DownloadRepository.resume(context, row.item.id) } },
+                onRetry = {
+                    scope.launch {
+                        DownloadRepository.remove(context, row.item.id)
+                        DownloadRepository.enqueue(context, row.item) { _, _ -> }
+                    }
+                },
                 onDelete = { scope.launch { DownloadRepository.remove(context, row.item.id) } },
             )
         }
@@ -151,6 +157,7 @@ private fun DownloadRowCard(
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
+    onRetry: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Column(
@@ -183,8 +190,10 @@ private fun DownloadRowCard(
                 TextButton(onClick = onPause) { Text("暂停") }
             } else if (row.isPaused) {
                 TextButton(onClick = onResume) { Text("继续") }
-            } else if (row.isDone) {
+            } else if (row.isDone && row.downloadedBytes > 0) {
                 TextButton(onClick = onPlay) { Text("播放") }
+            } else if (row.isFailed || row.isDone) {
+                TextButton(onClick = onRetry) { Text("重试") }
             }
             TextButton(onClick = onDelete) { Text("删除") }
         }
@@ -201,9 +210,14 @@ private fun DownloadRowCard(
 
 private fun statusText(row: DownloadRow): String {
     return when {
-        row.isDone -> "已完成 · " + formatBytes(row.totalBytes)
+        row.isDone && row.downloadedBytes <= 0 -> "已完成但内容为空，请删除后重下"
+        row.isDone -> "已完成 · " + formatBytes(if (row.totalBytes > 0) row.totalBytes else row.downloadedBytes)
         row.isDownloading -> "下载中 " + row.percent.toInt() + "%" +
-            if (row.totalBytes > 0) " · " + formatBytes(row.downloadedBytes) + " / " + formatBytes(row.totalBytes) else ""
+            if (row.totalBytes > 0) {
+                " · " + formatBytes(row.downloadedBytes) + " / " + formatBytes(row.totalBytes)
+            } else if (row.downloadedBytes > 0) {
+                " · 已下载 " + formatBytes(row.downloadedBytes)
+            } else ""
         row.isQueued -> "等待中"
         row.isPaused -> "已暂停 · " + row.percent.toInt() + "%"
         row.isFailed -> "失败，可删除后重试"

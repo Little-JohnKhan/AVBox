@@ -17,6 +17,8 @@ import com.github.avbox.osc.ui.MainActivity
 import com.github.avbox.osc.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -107,6 +109,8 @@ class DownloadForegroundService : Service() {
 
     private var listener: DownloadManager.Listener? = null
 
+    private var ticker: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         DownloadNotifications.ensureChannel(this)
@@ -125,9 +129,6 @@ class DownloadForegroundService : Service() {
                 download: Download,
                 finalException: Exception?,
             ) {
-                if (download.state == Download.STATE_COMPLETED) {
-                    DownloadLibrary.refreshAsync(this@DownloadForegroundService)
-                }
                 pushState()
             }
 
@@ -137,17 +138,24 @@ class DownloadForegroundService : Service() {
         }
         listener = l
         manager.addListener(l)
-        pushState()
+        // media3 的 Listener 只在状态变化时回调，分片进度不会通知，
+        // 所以这里自己每秒拉一次，跟下载列表保持一致。
+        ticker = scope.launch {
+            while (true) {
+                pushStateNow()
+                delay(1000L)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        pushState()
+        scope.launch { pushStateNow() }
         return START_NOT_STICKY
     }
 
-    private fun pushState() {
-        scope.launch {
-            val manager = DownloadStore.get(this@DownloadForegroundService)
+    private suspend fun pushStateNow() {
+        run {
+            val manager = DownloadStore.get(this)
             val rows = withContext(Dispatchers.IO) {
                 try {
                     val list = ArrayList<Download>()
@@ -161,7 +169,7 @@ class DownloadForegroundService : Service() {
                     AppLog.e("DownloadService", "query downloads failed", th)
                     null
                 }
-            } ?: return@launch
+            } ?: return
 
             val active = rows.filter {
                 it.state == Download.STATE_DOWNLOADING ||
@@ -170,7 +178,7 @@ class DownloadForegroundService : Service() {
             }
             if (active.isEmpty()) {
                 stopSelfSafely()
-                return@launch
+                return
             }
             var downloaded = 0L
             var total = 0L
@@ -213,6 +221,8 @@ class DownloadForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        ticker?.cancel()
+        ticker = null
         listener?.let { DownloadStore.get(this).removeListener(it) }
         listener = null
         scope.cancel()

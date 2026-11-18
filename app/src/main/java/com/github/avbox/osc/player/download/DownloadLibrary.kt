@@ -45,7 +45,7 @@ object DownloadLibrary {
         val fresh = HashMap<String, String>()
         for (item in items) {
             val d = downloads[item.id] ?: continue
-            if (d.state == Download.STATE_COMPLETED) fresh[item.playUrl] = item.id
+            if (d.state == Download.STATE_COMPLETED && d.bytesDownloaded > 0) fresh[item.playUrl] = item.id
         }
         done.clear()
         done.putAll(fresh)
@@ -60,6 +60,7 @@ object DownloadLibrary {
             while (cursor.moveToNext()) {
                 val d = cursor.download
                 val m = metaById[d.request.id] ?: continue
+                if (d.bytesDownloaded <= 0) continue
                 fresh[m.playUrl] = m.id
             }
         }

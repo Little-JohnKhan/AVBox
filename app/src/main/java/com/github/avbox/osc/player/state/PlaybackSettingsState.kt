@@ -44,7 +44,7 @@ object PlaybackSettingsState {
         playTunnel = KV.get(KVKeys.PLAY_TUNNEL, false),
         preferAac = KV.get(KVKeys.PLAY_PREFER_AAC, false),
         autoSwitchLine = KV.get(KVKeys.AUTO_SWITCH_LINE, KVKeys.AUTO_SWITCH_LINE_DEFAULT),
-        m3u8Purify = KV.get(KVKeys.M3U8_PURIFY, false),
+        m3u8Purify = KV.get(KVKeys.M3U8_PURIFY, true),
         bufferTimes = KV.get(KVKeys.BUFFER_TIMES, KVKeys.BUFFER_TIMES_DEFAULT),
         playCache = KV.get(KVKeys.PLAY_CACHE, false),
         exoCacheSizeMb = KV.get(KVKeys.EXO_CACHE_SIZE_MB, KVKeys.EXO_CACHE_SIZE_MB_DEFAULT),

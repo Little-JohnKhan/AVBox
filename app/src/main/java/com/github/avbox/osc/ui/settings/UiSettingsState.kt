@@ -27,7 +27,7 @@ object UiSettingsState {
 
     private fun load(): UiSettingsConfig = UiSettingsConfig(
         navAnimationDisabled = KV.get(KVKeys.NAV_ANIMATION_DISABLED, false),
-        navLiveHidden = KV.get(KVKeys.NAV_LIVE_HIDDEN, false),
+        navLiveHidden = KV.get(KVKeys.NAV_LIVE_HIDDEN, true),
         defaultLoadLive = KV.get(KVKeys.DEFAULT_LOAD_LIVE, false),
         collectColumns = KV.get(KVKeys.COLLECT_COLUMNS, 3),
         hideStatusBar = KV.get(KVKeys.HIDE_STATUS_BAR, false),
