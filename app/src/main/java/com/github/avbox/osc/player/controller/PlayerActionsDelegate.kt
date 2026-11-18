@@ -191,6 +191,36 @@ internal class PlayerActionsDelegate(private val host: VideoPlayerController) : 
         host.listener?.clickCast()
     }
 
+    override fun onDownloadClicked() {
+        val ctx = host.context
+        val url = com.github.avbox.osc.player.download.CurrentPlayback.url
+        if (url.isNullOrEmpty()) {
+            Toast.makeText(ctx, "当前没有可下载的播放地址", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val title = host.state.title.ifEmpty { "当前播放" }
+        val item = com.github.avbox.osc.player.download.DownloadItem(
+            id = com.github.avbox.osc.player.download.DownloadTasks.idOf(url, null, 0),
+            vodId = url,
+            vodName = title,
+            flag = null,
+            episodeIndex = 0,
+            episodeName = "",
+            playUrl = url,
+            headers = com.github.avbox.osc.player.download.CurrentPlayback.headers,
+            poster = null,
+            createdAt = System.currentTimeMillis(),
+        )
+        com.github.avbox.osc.player.download.DownloadRepository.enqueue(ctx, item) { ok, err ->
+            Toast.makeText(
+                ctx,
+                if (ok) "已加入下载" else "下载失败：" + (err ?: "未知错误"),
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+        keepControlsAlive()
+    }
+
     override fun onSubtitleClicked() {
         host.listener?.selectSubtitle()
         keepControlsAlive()

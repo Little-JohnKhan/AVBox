@@ -606,6 +606,7 @@ interface PlayerActions {
     fun onTimeResetClicked()
     fun onEpisodeClicked()
     fun onCastClicked()
+    fun onDownloadClicked()
     fun onSubtitleClicked()
     fun onSubtitleLongClicked()
     fun onAudioTrackClicked()

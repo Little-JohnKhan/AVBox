@@ -105,6 +105,14 @@ internal fun PlayerActionIcons(
             onClick = actions::onAudioTrackClicked,
         )
         PlayerActionIconButton(
+            iconRes = R.drawable.ic_arrow_down,
+            contentDescription = "下载本集",
+            box = size,
+            iconSize = iconSize,
+            expand = spread,
+            onClick = actions::onDownloadClicked,
+        )
+        PlayerActionIconButton(
             iconRes = R.drawable.player_ic_menu_video,
             contentDescription = stringResource(R.string.player_menu_video_track),
             box = size,

@@ -104,6 +104,7 @@ class PlayerEngine(
     private var speedPlaybackParameters: PlaybackParameters? = null
     private var mediaSource: MediaSource? = null
     private var currentPlayPath: String? = null
+    private var currentOriginPath: String? = null
     private var currentHeaders: Map<String, String>? = null
     private var retriedAsHls = false
 
@@ -329,6 +330,8 @@ class PlayerEngine(
         }
         // m3u8 先过一层本地净化代理：只换清单（剔广告分片），分片仍由播放器直连源站
         val originPath = playPath
+        currentOriginPath = originPath
+        com.github.avbox.osc.player.download.CurrentPlayback.update(originPath, headers)
         playPath = PurifyProxy.wrap(playPath, headers)
         currentPlayPath = playPath
         currentHeaders = copyHeaders(headers)
@@ -394,6 +397,14 @@ class PlayerEngine(
         frameRateWindowStartMs = 0
         measuredFrameRateValue = 0f
     }
+
+    /** 当前下发给播放器的地址（已被净化代理包装过） */
+    fun currentPlayUrl(): String? = currentPlayPath
+
+    /** 包装之前的原始地址，下载时要用这个去登记 host 请求头 */
+    fun currentOriginUrl(): String? = currentOriginPath
+
+    fun currentPlayHeaders(): Map<String, String>? = currentHeaders
 
     fun setStartPosition(positionMs: Long) {
         startPositionMs = maxOf(0L, positionMs)
