@@ -7,6 +7,8 @@ import com.github.avbox.osc.base.App
 import com.github.avbox.osc.server.ControlManager
 import com.github.avbox.osc.server.RemoteServer
 import com.github.avbox.osc.util.AppLog
+import com.github.avbox.osc.util.KV
+import com.github.avbox.osc.util.KVKeys
 import com.github.avbox.osc.util.LanguageManager
 import com.github.avbox.osc.player.usecase.M3u8
 import com.github.avbox.osc.util.RegexUtils
@@ -44,6 +46,14 @@ class M3u8PurifyUseCase(context: Context, private val callback: Callback) {
 
     fun playM3u8(url: String, headers: HashMap<String, String>?) {
         if (url.contains("url=")) {
+            callback.startPlayUrl(url, headers)
+            return
+        }
+        // 「M3U8 净化」开关打开时，净化改由播放器层的 PurifyProxy + StreamProxy 完成：
+        // 清单走本地代理净化、分片绝对化后直连源站，边播边缓存不受影响。
+        // 这里直接放行，避免同一份清单被两套逻辑处理，也避免播放地址被换成 proxyM3u8 导致缓存失效。
+        if (KV.get(KVKeys.M3U8_PURIFY, false)) {
+            AppLog.i("echo-m3u8-usecase-skip: purify handled by proxy layer")
             callback.startPlayUrl(url, headers)
             return
         }

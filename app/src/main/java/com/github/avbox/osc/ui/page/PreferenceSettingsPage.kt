@@ -41,6 +41,7 @@ import com.github.avbox.osc.event.UiEvents
 import com.github.avbox.osc.util.AppLanguage
 import com.github.avbox.osc.util.DanmuSettingsState
 import com.github.avbox.osc.util.LanguageManager
+import com.github.avbox.osc.util.PurifyStats
 import com.github.avbox.osc.util.SearchSettingsState
 import com.github.avbox.osc.util.restartApp
 import kotlin.math.roundToInt
@@ -166,6 +167,7 @@ fun PreferenceSettingsScreen(onNavigateBack: () -> Unit) {
                     SettingsSwitchRow(
                         title = stringResource(R.string.settings_m3u8_purify),
                         leadingIconRes = R.drawable.ic_pref_m3u8_purify,
+                        subtitle = remember { PurifyStats.summary() },
                         checked = playbackConfig.m3u8Purify,
                         onCheckedChange = { PlaybackSettingsState.m3u8Purify = it },
                     )

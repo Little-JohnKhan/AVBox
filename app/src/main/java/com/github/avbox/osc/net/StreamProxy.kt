@@ -3,6 +3,7 @@ package com.github.avbox.osc.net
 import com.github.avbox.osc.net.SuperParse
 import com.github.avbox.osc.util.AppLog
 import com.github.avbox.osc.util.LocalAddress
+import com.github.avbox.osc.player.usecase.M3u8
 import com.github.avbox.osc.util.M3u8Purifier
 import com.github.avbox.osc.util.PurifyStats
 
@@ -24,6 +25,8 @@ import okhttp3.Response
 
 object StreamProxy {
     private val URI_ATTR = Pattern.compile("URI=\"([^\"]+)\"")
+    /** 原版 M3u8.purify 用静态字段回传删除数，并发调用会互相覆盖 */
+    private val legacyLock = Any()
 
     @JvmStatic
     fun proxy(params: Map<String, String>): Array<Any?>? {
@@ -184,7 +187,13 @@ object StreamProxy {
         if (content == null) return ""
         var text = M3u8Purifier.stripBom(content)
         val report = M3u8Purifier.Report()
-        val purified = M3u8Purifier.purify(text, baseUrl, report)
+        var purified = M3u8Purifier.purify(text, baseUrl, report)
+        if (purified == null) {
+            // 我们的启发式没识别出广告，交给原版「目录多数派 + 广告域名过滤」再判一次。
+            // 两套算法互补：我们擅长随机 hash 分片与块结构异常，原版擅长少数派 CDN。
+            val legacy = legacyPurify(text, baseUrl, report)
+            if (legacy != null) purified = legacy
+        }
         if (purified != null) {
             text = purified
             AppLog.i("echo-purify-hit: " + report.toString())
@@ -215,6 +224,52 @@ object StreamProxy {
             sb.append(if (isVariant) localM3u8Proxy(absolute, params) else absolute).append('\n')
         }
         return sb.toString()
+    }
+
+    /**
+     * 原版算法兜底。
+     *
+     * <p>M3u8.purify 走的是「目录多数派 + 广告域名过滤」，对少数派 CDN 型的广告很敏感；
+     * 我们的 M3u8Purifier 走「块结构异常」，对随机 hash 的广告分片更敏感。
+     * 两边都不命中才算这个源干净。
+     */
+    private fun legacyPurify(content: String, baseUrl: String, report: M3u8Purifier.Report): String? =
+        // M3u8.currentAdCount 是静态字段，并发处理多份清单时会串，这里串行化
+        synchronized(legacyLock) {
+            try {
+                val result = M3u8.purify(dirOf(baseUrl), content)
+                val adCount = M3u8.currentAdCount
+                if (result == null || adCount <= 0) {
+                    null
+                } else {
+                    report.dropped = adCount
+                    if (report.total <= 0) report.total = countSegments(content)
+                    report.reason = "原版多数派"
+                    AppLog.i("echo-purify-legacy: dropped=" + adCount + "/" + report.total)
+                    result
+                }
+            } catch (th: Throwable) {
+                AppLog.e("Proxy", "legacy purify failed", th)
+                null
+            }
+        }
+
+    /** 清单所在目录，末尾带斜杠；原版 purify 需要这个前缀去解析相对路径 */
+    private fun dirOf(url: String): String {
+        val q = url.indexOf('?')
+        val u = if (q >= 0) url.substring(0, q) else url
+        val i = u.lastIndexOf('/')
+        return if (i > 8) u.substring(0, i + 1) else u
+    }
+
+    private fun countSegments(content: String?): Int {
+        if (content == null) return 0
+        var n = 0
+        for (line in content.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
+            val s = line.trim { it <= ' ' }
+            if (s.isNotEmpty() && s.charAt(0) != '#') n++
+        }
+        return n
     }
 
     /** 绝对化 #EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等标签里的 URI="..."，子清单仍走净化代理 */

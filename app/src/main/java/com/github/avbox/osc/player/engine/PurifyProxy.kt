@@ -25,7 +25,13 @@ import java.net.URLEncoder
  */
 object PurifyProxy {
 
-    const val KEY_ENABLED = "player_purify_m3u8"
+    /**
+     * 和原版「M3U8 净化」开关共用同一个 KV 键。
+     * 用户只看到一个开关，底下由这个开关同时驱动：
+     * 1) 这里把 m3u8 换成本地净化代理（清单走代理、分片直连）；
+     * 2) M3u8PurifyUseCase 看到开关开着就不再自己拉清单，避免重复净化 + 缓存失效。
+     */
+    const val KEY_ENABLED = "m3u8_purify"
 
     private const val FLAG = "pure=1"
 
@@ -34,9 +40,9 @@ object PurifyProxy {
 
     fun enabled(): Boolean {
         return try {
-            KV.get(KEY_ENABLED, true)
+            KV.get(KEY_ENABLED, false)
         } catch (th: Throwable) {
-            true
+            false
         }
     }
 
