@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.github.avbox.osc.player.engine.MediaSources
 import com.github.avbox.osc.player.engine.PlayerCache
+import com.github.avbox.osc.player.engine.PurifyProxy
 import com.github.avbox.osc.util.KVKeys
 import com.github.avbox.osc.util.KV
 import com.github.avbox.osc.util.AppLog
@@ -76,16 +77,19 @@ object PreloadManagerHolder {
                 AppLog.i("echo-preload-already: " + url)
                 return
             }
+            // 净化开着时，预载也走本地净化代理：拉到的清单已剔广告，
+            // 分片地址与播放时（同样净化后绝对化）一致，缓存才能真正命中。
+            val target = PurifyProxy.wrap(url, headers)
             sStartPosMs = maxOf(0L, startPosMs)
             sRangeMs = preloadRangeMs()
             _completedUrl.value = null
             sPreloadHeaders = if (headers == null) emptyMap() else HashMap(headers)
             sPreloadTargets[url] = headersSignature(headers)
-            val item = MediaSources.buildPreloadMediaItem(url, headers)
+            val item = MediaSources.buildPreloadMediaItem(target, headers)
             sRegistry[key] = item
             manager.add(item, 0)
             manager.invalidate()
-            AppLog.i("echo-preload-start: " + url)
+            AppLog.i("echo-preload-start: " + target)
         } catch (th: Throwable) {
             AppLog.e("echo-preload-error: " + url + " " + th)
         }

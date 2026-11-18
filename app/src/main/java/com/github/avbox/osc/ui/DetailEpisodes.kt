@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
@@ -159,7 +160,6 @@ internal fun EpisodeRow(
                         name = ep.name ?: (index + 1).toString(),
                         selected = index == playIndex,
                         onClick = { vm.onEpisodeClick(index) },
-                        modifier = Modifier.fillParentMaxWidth(),
                     )
                 }
             }
@@ -267,6 +267,7 @@ private fun EpisodeNameCard(
     val shape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
+            .widthIn(max = 180.dp)
             .detailGlass(shape)
             .then(
                 if (selected) {
@@ -288,8 +289,9 @@ private fun EpisodeNameCard(
             } else {
                 MaterialTheme.colorScheme.onSurface
             },
-            maxLines = Int.MAX_VALUE,
-            softWrap = true,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
         )
     }

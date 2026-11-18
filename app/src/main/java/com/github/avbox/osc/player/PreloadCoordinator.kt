@@ -204,14 +204,8 @@ class PreloadCoordinator(
             gaveUp(snapshot)
             return
         }
-        if (url.contains(".m3u8") &&
-            KV.get(KVKeys.M3U8_PURIFY, false) &&
-            !DefaultConfig.noAd(snapshot.playFlag)
-        ) {
-            AppLog.i("echo-preload-giveup: m3u8 purify on, url=" + url)
-            gaveUp(snapshot)
-            return
-        }
+        // 净化模式下预载同样可用：PreloadManagerHolder.preload() 会把地址换成净化代理，
+        // 预载拿到的是剔除广告后的清单，分片 URL 与播放时绝对化后的一致，缓存能直接命中。
         val headers = extractHeaders(info)
         var startPos = snapshot.startSkipMs
         if (!HistoryHelper.isIncognito()) {
