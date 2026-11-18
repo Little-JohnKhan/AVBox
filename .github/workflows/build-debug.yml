@@ -30,13 +30,22 @@ jobs:
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f | head -n1)"
+          [ -n "$SDKMANAGER" ] || { echo "::error::sdkmanager not found"; exit 1; }
+          sdkmanager() { "$SDKMANAGER" "$@"; }
           ALL="$(sdkmanager --list 2>/dev/null)" || true
           PLATFORM="$(echo "$ALL" | grep -oE 'platforms;android-37(\.[0-9]+)?' | sort -V | tail -n1 || true)"
           NDK="$(echo "$ALL" | grep -oE 'ndk;27\.2\.12479018' | sort -V | tail -n1 || true)"
-          [ -n "$PLATFORM" ] || exit 1
-          [ -n "$NDK" ] || exit 1
+          BUILD_TOOLS="$(echo "$ALL" | grep -oE 'build-tools;3[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n1 || true)"
+          echo "PLATFORM=$PLATFORM NDK=$NDK BUILD_TOOLS=$BUILD_TOOLS"
+          [ -n "$PLATFORM" ] || { echo "::error::android-37 not found"; exit 1; }
+          [ -n "$NDK" ] || { echo "::error::ndk not found"; exit 1; }
           yes 2>/dev/null | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "$PLATFORM" "$NDK"
+          ARGS=("$PLATFORM" "$NDK")
+          [ -n "$BUILD_TOOLS" ] && ARGS+=("$BUILD_TOOLS")
+          sdkmanager "${ARGS[@]}"
+          test -d "$SDK_ROOT/platforms/${PLATFORM#platforms;}" || { echo "::error::platform missing"; exit 1; }
+          test -d "$SDK_ROOT/ndk/${NDK#ndk;}" || { echo "::error::ndk missing"; exit 1; }
+          python3 -c "import sys; print('build python:', sys.version)"
 
       - run: chmod +x gradlew
 
