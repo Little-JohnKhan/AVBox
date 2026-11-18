@@ -332,7 +332,7 @@ class PlayerEngine(
         val originPath = playPath
         currentOriginPath = originPath
         com.github.avbox.osc.player.download.CurrentPlayback.update(originPath, headers)
-        // 已下载的集直接播本地成品文件：不联网、不走净化代理、不碰下载缓存
+        // 本地成品文件存在就直接播它：不联网、不走净化代理、不碰播放缓存
         val localFile = com.github.avbox.osc.player.download.DownloadLibrary.localPathOf(originPath)
         playPath = if (localFile != null) originPath else PurifyProxy.wrap(playPath, headers)
         currentPlayPath = playPath
@@ -350,9 +350,7 @@ class PlayerEngine(
         }
         if (localFile != null) {
             AppLog.i("echo-play-local-file: $localFile")
-            mediaSource = mediaSources.getMediaSource(
-                android.net.Uri.fromFile(java.io.File(localFile)).toString(),
-            )
+            mediaSource = mediaSources.getMediaSource(android.net.Uri.fromFile(java.io.File(localFile)).toString())
         } else {
             mediaSource = mediaSources.getMediaSource(playPath, copyHeaders(currentHeaders))
         }

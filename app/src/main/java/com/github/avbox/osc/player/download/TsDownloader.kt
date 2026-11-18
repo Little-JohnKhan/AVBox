@@ -13,6 +13,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -127,6 +129,9 @@ object TsDownloader {
 
     private const val TAG = "TsDownloader"
 
+    /** 同时下载的分片数。源站多为单连接限速，并发才能把总带宽吃满 */
+    private const val CONCURRENCY = 4
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
     private val mem = ConcurrentHashMap<String, TsTask>()
@@ -177,13 +182,11 @@ object TsDownloader {
         return mem[id]
     }
 
-    fun fileOf(ctx: Context, id: String): File = File(dirOf(ctx), id + ".ts")
+    /** 下载中的临时文件：Download/AVBox/<名字>.ts.part */
+    fun partFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts.part")
 
-    fun dirOf(ctx: Context): File {
-        val dir = File(ctx.applicationContext.filesDir, "ts-downloads")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
-    }
+    /** 成品：Download/AVBox/<名字>.ts，外部播放器可直接打开 */
+    fun publicFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts")
 
     fun publicDir(): File {
         val dir = File(
@@ -194,7 +197,11 @@ object TsDownloader {
         return dir
     }
 
-    fun publicFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts")
+    /** 兼容旧调用点：直接指向成品文件 */
+    fun fileOf(ctx: Context, id: String): File {
+        val task = get(id)
+        return if (task != null) publicFileOf(task) else File(publicDir(), id + ".ts")
+    }
 
     fun publicFileOf(ctx: Context, id: String): File? {
         val task = get(id) ?: return null
@@ -250,17 +257,16 @@ object TsDownloader {
     }
 
     fun remove(ctx: Context, id: String) {
-        val app = ctx.applicationContext
         val task = mem[id]
         paused.add(id)
         jobs.remove(id)?.cancel()
         mem.remove(id)
         TsTaskStore.remove(id)
-        try {
-            fileOf(app, id).delete()
-        } catch (ignored: Throwable) {
-        }
         if (task != null) {
+            try {
+                partFileOf(task).delete()
+            } catch (ignored: Throwable) {
+            }
             try {
                 publicFileOf(task).delete()
             } catch (ignored: Throwable) {
@@ -298,59 +304,74 @@ object TsDownloader {
         if (segments.isEmpty()) throw IOException("清单里没有分片")
         AppLog.i(TAG + " segments=" + segments.size + " id=" + id)
 
-        val file = fileOf(ctx, id)
+        val dir = publicDir()
+        if (!dir.canWrite()) {
+            throw IOException("下载目录不可写，请在系统设置里允许 AVBox 访问「所有文件」")
+        }
+        val part = partFileOf(task)
+        val target = publicFileOf(task)
         val prev = mem[id]
         var startIndex = 0
         if (prev != null && prev.totalSegments == segments.size &&
-            prev.doneSegments > 0 && prev.doneSegments < segments.size && file.exists()
+            prev.doneSegments > 0 && prev.doneSegments < segments.size &&
+            part.exists() && part.length() == prev.bytes
         ) {
             startIndex = prev.doneSegments
             AppLog.i(TAG + " resume " + startIndex + "/" + segments.size)
-        } else if (file.exists()) {
-            file.delete()
+        } else if (part.exists()) {
+            part.delete()
         }
-        var written = if (file.exists()) file.length() else 0L
+        var written = if (part.exists()) part.length() else 0L
         update(ctx, id) { it.copy(totalSegments = segments.size, doneSegments = startIndex, bytes = written) }
 
-        FileOutputStream(file, startIndex > 0).use { os ->
-            for (i in startIndex until segments.size) {
+        FileOutputStream(part, startIndex > 0).use { os ->
+            var index = startIndex
+            while (index < segments.size) {
                 if (paused.contains(id)) {
                     os.flush()
                     update(ctx, id) { it.copy(state = Download.STATE_STOPPED) }
-                    AppLog.i(TAG + " paused at " + i + "/" + segments.size)
+                    AppLog.i(TAG + " paused at " + index + "/" + segments.size)
                     return
                 }
-                val bytes = fetchSegment(segments[i], task.headers)
-                os.write(bytes)
-                os.flush()
-                written += bytes.size
-                val done = i + 1
-                update(ctx, id) { it.copy(doneSegments = done, bytes = written, totalBytes = written) }
+                // 一批并发抓下来，再按顺序落盘：顺序不变，尾部只剩当前批不满的窗口
+                val end = minOf(index + CONCURRENCY, segments.size)
+                val batch = coroutineScope {
+                    (index until end).map { i ->
+                        async(Dispatchers.IO) { fetchSegment(segments[i], task.headers) }
+                    }
+                }
+                for ((offset, deferred) in batch.withIndex()) {
+                    val bytes = deferred.await()
+                    os.write(bytes)
+                    os.flush()
+                    written += bytes.size
+                    val done = index + offset + 1
+                    update(ctx, id) { it.copy(doneSegments = done, bytes = written, totalBytes = written) }
+                }
+                index = end
             }
         }
 
-        DownloadLibrary.markDone(task.playUrl, file.absolutePath)
-        val publicCopy = try {
-            val target = publicFileOf(task)
-            file.copyTo(target, overwrite = true)
-            target.absolutePath
-        } catch (th: Throwable) {
-            AppLog.e(TAG, "copy to public failed", th)
-            null
+        // 收尾：.part 改名成 .ts，公开目录里直接就是一个能播的成品文件
+        if (target.exists()) target.delete()
+        if (!part.renameTo(target)) {
+            part.copyTo(target, overwrite = true)
+            part.delete()
         }
+        DownloadLibrary.markDone(task.playUrl, target.absolutePath)
         update(ctx, id) { t ->
             t.copy(
                 state = Download.STATE_COMPLETED,
-                bytes = file.length(),
-                totalBytes = file.length(),
+                bytes = target.length(),
+                totalBytes = target.length(),
                 doneSegments = segments.size,
                 totalSegments = segments.size,
                 error = null,
             )
         }
         AppLog.i(
-            TAG + " done id=" + id + " size=" + file.length() +
-                " segments=" + segments.size + " public=" + publicCopy,
+            TAG + " done id=" + id + " size=" + target.length() +
+                " segments=" + segments.size + " file=" + target.absolutePath,
         )
     }
 
