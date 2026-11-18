@@ -592,7 +592,11 @@ class VideoPlayerController(
     }
 
     override fun playM3u8(url: String?, headers: HashMap<String, String>?) {
-        m3u8PurifyUseCase.playM3u8(url ?: return, headers)
+        // 净化统一交给播放器层：PurifyProxy 把 m3u8 换成本地净化代理，
+        // StreamProxy 里跑 M3u8Purifier + 原版算法兜底，分片绝对化后直连源站。
+        // 这里直接走原版「未命中广告」时的同一条路径，不再经过 M3u8PurifyUseCase，
+        // 避免它把播放地址换成 proxyM3u8 导致边播边缓存失效，也避免两套净化互相覆盖。
+        listener?.startPlayUrl(url ?: return, headers)
     }
 
     override fun encodeUrl(url: String?): String = PlayerSwitchUseCase.encodeUrl(url)

@@ -264,7 +264,7 @@ private fun EpisodeNameCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
             .detailGlass(shape)
@@ -276,12 +276,12 @@ private fun EpisodeNameCard(
                 },
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 10.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = name,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
             color = if (selected) {
                 MaterialTheme.colorScheme.primary
