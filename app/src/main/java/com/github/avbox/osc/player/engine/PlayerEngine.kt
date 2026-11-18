@@ -332,7 +332,9 @@ class PlayerEngine(
         val originPath = playPath
         currentOriginPath = originPath
         com.github.avbox.osc.player.download.CurrentPlayback.update(originPath, headers)
-        playPath = PurifyProxy.wrap(playPath, headers)
+        // 已下载的集复用「入队时那份精确 URL」，保证清单和分片都能命中下载缓存
+        val downloadedUrl = com.github.avbox.osc.player.download.DownloadLibrary.wrappedUrlOf(originPath)
+        playPath = downloadedUrl ?: PurifyProxy.wrap(playPath, headers)
         currentPlayPath = playPath
         currentHeaders = copyHeaders(headers)
         isoSession = MediaSources.isoHeaders(currentHeaders)

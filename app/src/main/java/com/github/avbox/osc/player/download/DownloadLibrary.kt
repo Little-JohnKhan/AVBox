@@ -22,7 +22,15 @@ object DownloadLibrary {
 
     private val done = ConcurrentHashMap<String, String>()
 
+    /** 原始地址 → 入队时的净化代理地址。播放时按它构造，才能和下载时完全一致。 */
+    private val wrapped = ConcurrentHashMap<String, String>()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    fun wrappedUrlOf(originUrl: String?): String? {
+        if (originUrl.isNullOrEmpty()) return null
+        return wrapped[originUrl]
+    }
 
     fun isDownloaded(originUrl: String?): Boolean {
         if (originUrl.isNullOrEmpty()) return false
@@ -43,12 +51,18 @@ object DownloadLibrary {
     /** 用调用方已经查到的结果直接更新，省一次数据库查询 */
     fun updateFrom(items: List<DownloadItem>, downloads: Map<String, Download>) {
         val fresh = HashMap<String, String>()
+        val freshWrapped = HashMap<String, String>()
         for (item in items) {
             val d = downloads[item.id] ?: continue
-            if (d.state == Download.STATE_COMPLETED && d.bytesDownloaded > 0) fresh[item.playUrl] = item.id
+            if (d.state == Download.STATE_COMPLETED && d.bytesDownloaded > 0) {
+                fresh[item.playUrl] = item.id
+                item.wrappedUrl?.takeIf { it.isNotEmpty() }?.let { w -> freshWrapped[item.playUrl] = w }
+            }
         }
         done.clear()
         done.putAll(fresh)
+        wrapped.clear()
+        wrapped.putAll(freshWrapped)
     }
 
     /** 同步刷新，调用方必须已经在后台线程 */
@@ -56,16 +70,20 @@ object DownloadLibrary {
         val manager = DownloadStore.get(context)
         val metaById = DownloadMetaStore.all().associateBy { it.id }
         val fresh = HashMap<String, String>()
+        val freshWrapped = HashMap<String, String>()
         manager.downloadIndex.getDownloads(Download.STATE_COMPLETED).use { cursor ->
             while (cursor.moveToNext()) {
                 val d = cursor.download
                 val m = metaById[d.request.id] ?: continue
                 if (d.bytesDownloaded <= 0) continue
                 fresh[m.playUrl] = m.id
+                m.wrappedUrl?.takeIf { it.isNotEmpty() }?.let { w -> freshWrapped[m.playUrl] = w }
             }
         }
         done.clear()
         done.putAll(fresh)
+        wrapped.clear()
+        wrapped.putAll(freshWrapped)
         AppLog.i("echo-download-library: n=" + done.size)
     }
 }

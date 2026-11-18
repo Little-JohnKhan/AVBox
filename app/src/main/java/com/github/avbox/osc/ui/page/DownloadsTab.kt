@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -52,6 +53,7 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
     var rows by remember { mutableStateOf<List<DownloadRow>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var manualUrl by remember { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<DownloadRow?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -145,10 +147,46 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
                         DownloadRepository.enqueue(context, row.item) { _, _ -> }
                     }
                 },
-                onDelete = { scope.launch { DownloadRepository.remove(context, row.item.id) } },
+                onDelete = { pendingDelete = row },
             )
         }
     }
+
+    val target = pendingDelete
+    if (target != null) {
+        ConfirmDeleteDialog(
+            row = target,
+            onDismiss = { pendingDelete = null },
+            onConfirm = {
+                scope.launch { DownloadRepository.remove(context, target.item.id) }
+                pendingDelete = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun ConfirmDeleteDialog(
+    row: DownloadRow,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("删除下载") },
+        text = {
+            Text(
+                "《" + row.item.vodName + "》" + row.item.episodeName +
+                    "\n本地文件会一并清除，删除后需要重新下载。",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("删除") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

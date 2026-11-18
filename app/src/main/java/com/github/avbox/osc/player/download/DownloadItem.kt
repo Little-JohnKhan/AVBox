@@ -14,6 +14,8 @@ data class DownloadItem(
     val episodeIndex: Int,
     val episodeName: String,
     val playUrl: String,
+    /** 入队时真正使用的净化代理地址，播放时用它才能命中下载缓存 */
+    val wrappedUrl: String? = null,
     val headers: Map<String, String>?,
     val poster: String?,
     val createdAt: Long,

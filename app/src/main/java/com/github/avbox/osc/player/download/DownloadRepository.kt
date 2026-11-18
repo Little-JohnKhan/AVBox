@@ -35,19 +35,25 @@ object DownloadRepository {
 
     /** 入队。回调在主线程。 */
     fun enqueue(context: Context, item: DownloadItem, onDone: (Boolean, String?) -> Unit) {
-        DownloadMetaStore.put(item)
+        // 记下入队时真正用的净化地址，播放时按它构造才能命中缓存
+        val stored = if (item.wrappedUrl.isNullOrEmpty()) {
+            item.copy(wrappedUrl = com.github.avbox.osc.player.engine.PurifyProxy.wrap(item.playUrl, item.headers))
+        } else {
+            item
+        }
+        DownloadMetaStore.put(stored)
         DownloadTasks.prepareRequest(
             context = context,
-            item = item,
+            item = stored,
             onReady = { request: DownloadRequest ->
                 try {
                     DownloadStore.get(context).addDownload(request)
                     DownloadNotifications.refresh(context)
-                    AppLog.i("echo-download-enqueue: id=" + item.id + " name=" + item.vodName + " ep=" + item.episodeName)
+                    AppLog.i("echo-download-enqueue: id=" + stored.id + " name=" + stored.vodName + " ep=" + stored.episodeName)
                     onDone(true, null)
                 } catch (th: Throwable) {
                     AppLog.e("DownloadRepository", "enqueue failed", th)
-                    DownloadMetaStore.remove(item.id)
+                    DownloadMetaStore.remove(stored.id)
                     onDone(false, th.message)
                 }
             },

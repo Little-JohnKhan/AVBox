@@ -40,9 +40,9 @@ object PurifyProxy {
 
     fun enabled(): Boolean {
         return try {
-            KV.get(KEY_ENABLED, false)
+            KV.get(KEY_ENABLED, true)
         } catch (th: Throwable) {
-            false
+            true
         }
     }
 
