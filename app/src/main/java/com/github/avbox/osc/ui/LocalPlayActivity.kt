@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.Uri
-import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.media3.common.MediaItem
@@ -23,14 +22,14 @@ import java.io.File
  *
  * 存在的理由：详情页那套播放器要先拉剧集详情才能起播，断网时连详情页都进不去，
  * 下载好的文件根本没法播。这里绕开整条网络链路，只保留「文件 → 播放器」。
+ *
+ * 初始化写在 [init]（BaseActivity.onCreate 里回调）之后，不覆盖 onCreate。
  */
 class LocalPlayActivity : BaseActivity() {
 
     private var player: ExoPlayer? = null
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
+    override fun init() {
         val path = intent.getStringExtra(EXTRA_PATH).orEmpty()
         if (path.isEmpty()) {
             Toast.makeText(this, "没有指定视频文件", Toast.LENGTH_SHORT).show()
@@ -52,6 +51,7 @@ class LocalPlayActivity : BaseActivity() {
         view.setShowPreviousButton(false)
         view.setShowFastForwardButton(false)
         view.setShowRewindButton(false)
+        // BaseActivity 已经把 compose_view 设为内容视图，这里直接换成播放器视图
         setContentView(view)
 
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
