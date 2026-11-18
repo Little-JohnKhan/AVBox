@@ -1,5 +1,6 @@
 package com.github.avbox.osc.ui.page
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.github.avbox.osc.player.download.DownloadExporter
 import com.github.avbox.osc.player.download.DownloadRepository
 import com.github.avbox.osc.player.download.DownloadRow
 import kotlinx.coroutines.delay
@@ -147,6 +149,16 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
                         DownloadRepository.enqueue(context, row.item) { _, _ -> }
                     }
                 },
+                onExport = {
+                    scope.launch {
+                        val r = DownloadExporter.export(context, row.item)
+                        val msg = r.fold(
+                            { f -> "已导出：" + f.absolutePath },
+                            { e -> "导出失败：" + (e.message ?: "未知错误") },
+                        )
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    }
+                },
                 onDelete = { pendingDelete = row },
             )
         }
@@ -196,6 +208,7 @@ private fun DownloadRowCard(
     onPause: () -> Unit,
     onResume: () -> Unit,
     onRetry: () -> Unit,
+    onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Column(
@@ -229,7 +242,7 @@ private fun DownloadRowCard(
             } else if (row.isPaused) {
                 TextButton(onClick = onResume) { Text("继续") }
             } else if (row.isDone && row.downloadedBytes > 0) {
-                TextButton(onClick = onPlay) { Text("播放") }
+                TextButton(onClick = onExport) { Text("导出") }
             } else if (row.isFailed || row.isDone) {
                 TextButton(onClick = onRetry) { Text("重试") }
             }
