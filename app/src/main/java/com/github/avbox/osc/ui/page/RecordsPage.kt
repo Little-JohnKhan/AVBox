@@ -50,6 +50,7 @@ import kotlinx.coroutines.flow.drop
 private enum class RecordsMode {
     History,
     Collect,
+    Download,
 }
 
 private sealed interface RecordsDialog {
@@ -216,6 +217,11 @@ fun RecordsPage(
                         value = RecordsMode.Collect,
                         iconPainter = painterResource(R.drawable.ic_tab_collect),
                     ),
+                    SegmentOption(
+                        label = "下载",
+                        value = RecordsMode.Download,
+                        iconPainter = painterResource(R.drawable.ic_tab_records),
+                    ),
                 ),
                 selectedValue = mode,
                 onOptionSelected = { mode = it },
@@ -229,7 +235,7 @@ fun RecordsPage(
             AnimatedContent(
                 targetState = mode,
                 transitionSpec = {
-                    val toRight = targetState == RecordsMode.Collect
+                    val toRight = targetState.ordinal > initialState.ordinal
                     (
                         slideInHorizontally(spring(stiffness = Spring.StiffnessMedium)) { full ->
                             if (toRight) full / 4 else -full / 4
@@ -268,6 +274,7 @@ fun RecordsPage(
                             navBottom = navBottom,
                         )
                     }
+                    RecordsMode.Download -> DownloadsTab(navStart = navStart, navBottom = navBottom)
                 }
             }
         }
