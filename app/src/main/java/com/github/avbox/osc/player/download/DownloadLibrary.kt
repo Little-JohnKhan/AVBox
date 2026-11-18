@@ -11,79 +11,61 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 「哪些集已经下载完成」的进程内索引。
+ * 「哪些集已经有本地成品文件」的进程内索引。
  *
- * 播放时要在 setDataSource（主线程、同步）里判断该集有没有下载好，
- * 不能现场查 SQLite，所以这里用一份内存表，由后台任务刷新。
+ * 播放要在 setDataSource（主线程、同步）里判断，不能现场读 KV，所以用内存表，
+ * 由下载器完成时写入、启动时批量重建。
  *
- * 键是**原始播放地址**（不是净化代理地址），因为播放侧和下载侧拿到的原始地址是同一个字符串。
+ * 键是原始播放地址（不是净化代理地址），因为播放侧传给 setDataSource 的就是它。
  */
 object DownloadLibrary {
 
-    private val done = ConcurrentHashMap<String, String>()
-
-    /** 原始地址 → 入队时的净化代理地址。播放时按它构造，才能和下载时完全一致。 */
-    private val wrapped = ConcurrentHashMap<String, String>()
+    /** 原始地址 → 本地 .ts 绝对路径 */
+    private val localPaths = ConcurrentHashMap<String, String>()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    fun wrappedUrlOf(originUrl: String?): String? {
+    fun localPathOf(originUrl: String?): String? {
         if (originUrl.isNullOrEmpty()) return null
-        return wrapped[originUrl]
+        return localPaths[originUrl]
     }
 
-    fun isDownloaded(originUrl: String?): Boolean {
-        if (originUrl.isNullOrEmpty()) return false
-        return done.containsKey(originUrl)
+    fun isDownloaded(originUrl: String?): Boolean = localPathOf(originUrl) != null
+
+    /** 保留旧签名：自制下载器不再需要包装地址，播放直接读本地文件 */
+    fun wrappedUrlOf(originUrl: String?): String? = null
+
+    fun markDone(originUrl: String, path: String) {
+        if (originUrl.isEmpty() || path.isEmpty()) return
+        localPaths[originUrl] = path
+        AppLog.i("echo-download-library-done: n=" + localPaths.size + " path=" + path)
     }
 
-    /** 后台刷新，不阻塞调用方 */
-    fun refreshAsync(context: Context) {
+    fun markRemoved(originUrl: String?) {
+        if (originUrl.isNullOrEmpty()) return
+        localPaths.remove(originUrl)
+        AppLog.i("echo-download-library-remove: n=" + localPaths.size)
+    }
+
+    /** 从持久化任务表重建索引（App 启动后调用一次即可） */
+    fun load(context: Context) {
         scope.launch {
             try {
-                refresh(context)
+                val fresh = HashMap<String, String>()
+                for (task in TsTaskStore.all()) {
+                    if (task.state != Download.STATE_COMPLETED) continue
+                    val file = TsDownloader.fileOf(context.applicationContext, task.id)
+                    if (!file.exists() || file.length() <= 0L) continue
+                    fresh[task.playUrl] = file.absolutePath
+                }
+                localPaths.clear()
+                localPaths.putAll(fresh)
+                AppLog.i("echo-download-library-load: n=" + localPaths.size)
             } catch (th: Throwable) {
-                AppLog.e("DownloadLibrary", "refresh failed", th)
+                AppLog.e("DownloadLibrary", "load failed", th)
             }
         }
     }
 
-    /** 用调用方已经查到的结果直接更新，省一次数据库查询 */
-    fun updateFrom(items: List<DownloadItem>, downloads: Map<String, Download>) {
-        val fresh = HashMap<String, String>()
-        val freshWrapped = HashMap<String, String>()
-        for (item in items) {
-            val d = downloads[item.id] ?: continue
-            if (d.state == Download.STATE_COMPLETED && d.bytesDownloaded > 0) {
-                fresh[item.playUrl] = item.id
-                item.wrappedUrl?.takeIf { it.isNotEmpty() }?.let { w -> freshWrapped[item.playUrl] = w }
-            }
-        }
-        done.clear()
-        done.putAll(fresh)
-        wrapped.clear()
-        wrapped.putAll(freshWrapped)
-    }
-
-    /** 同步刷新，调用方必须已经在后台线程 */
-    fun refresh(context: Context) {
-        val manager = DownloadStore.get(context)
-        val metaById = DownloadMetaStore.all().associateBy { it.id }
-        val fresh = HashMap<String, String>()
-        val freshWrapped = HashMap<String, String>()
-        manager.downloadIndex.getDownloads(Download.STATE_COMPLETED).use { cursor ->
-            while (cursor.moveToNext()) {
-                val d = cursor.download
-                val m = metaById[d.request.id] ?: continue
-                if (d.bytesDownloaded <= 0) continue
-                fresh[m.playUrl] = m.id
-                m.wrappedUrl?.takeIf { it.isNotEmpty() }?.let { w -> freshWrapped[m.playUrl] = w }
-            }
-        }
-        done.clear()
-        done.putAll(fresh)
-        wrapped.clear()
-        wrapped.putAll(freshWrapped)
-        AppLog.i("echo-download-library: n=" + done.size)
-    }
+    fun refreshAsync(context: Context) = load(context)
 }

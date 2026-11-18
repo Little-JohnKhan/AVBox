@@ -11,24 +11,24 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.media3.exoplayer.offline.Download
-import androidx.media3.exoplayer.offline.DownloadManager
 import com.github.avbox.osc.R
 import com.github.avbox.osc.ui.MainActivity
 import com.github.avbox.osc.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * 下载通知 + 前台服务。
  *
- * 下载线程跑在 App 进程里，没有前台服务的话切到后台很容易被系统回收（
- * 之前的 TVBox 版就吃过这个亏）。这里挂一个最低成本的前台通知保住进程优先级。
+ * 下载线程跑在 App 进程里，没有前台服务的话切到后台很容易被系统回收。
+ * 这里挂一个最低成本的前台通知保住进程优先级，进度由服务自己每秒拉一次
+ * （[TsDownloader] 的状态在内存里，读取无 IO 开销）。
  */
 object DownloadNotifications {
 
@@ -44,7 +44,6 @@ object DownloadNotifications {
         manager.createNotificationChannel(channel)
     }
 
-    /** 拉起前台服务（已有任务时重复调用无副作用） */
     fun refresh(context: Context) {
         try {
             val intent = Intent(context, DownloadForegroundService::class.java)
@@ -107,8 +106,6 @@ class DownloadForegroundService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private var listener: DownloadManager.Listener? = null
-
     private var ticker: Job? = null
 
     override fun onCreate() {
@@ -122,29 +119,8 @@ class DownloadForegroundService : Service() {
         } catch (th: Throwable) {
             AppLog.e("DownloadService", "startForeground failed", th)
         }
-        val manager = DownloadStore.get(this)
-        val l = object : DownloadManager.Listener {
-            override fun onDownloadChanged(
-                downloadManager: DownloadManager,
-                download: Download,
-                finalException: Exception?,
-            ) {
-                if (download.state == Download.STATE_COMPLETED) {
-                    DownloadLibrary.refreshAsync(this@DownloadForegroundService)
-                }
-                scope.launch { pushStateNow() }
-            }
-
-            override fun onDownloadRemoved(downloadManager: DownloadManager, download: Download) {
-                scope.launch { pushStateNow() }
-            }
-        }
-        listener = l
-        manager.addListener(l)
-        // media3 的 Listener 只在状态变化时回调，分片进度不会通知，
-        // 所以这里自己每秒拉一次，跟下载列表保持一致。
         ticker = scope.launch {
-            while (true) {
+            while (isActive) {
                 pushStateNow()
                 delay(1000L)
             }
@@ -156,53 +132,34 @@ class DownloadForegroundService : Service() {
         return START_NOT_STICKY
     }
 
-    private suspend fun pushStateNow() {
-        run {
-            val manager = DownloadStore.get(this)
-            val rows = withContext(Dispatchers.IO) {
-                try {
-                    val list = ArrayList<Download>()
-                    manager.downloadIndex.getDownloads().use { cursor ->
-                        while (cursor.moveToNext()) {
-                            list.add(cursor.download)
-                        }
-                    }
-                    list
-                } catch (th: Throwable) {
-                    AppLog.e("DownloadService", "query downloads failed", th)
-                    null
-                }
-            } ?: return
-
-            val active = rows.filter {
-                it.state == Download.STATE_DOWNLOADING ||
-                    it.state == Download.STATE_QUEUED ||
-                    it.state == Download.STATE_RESTARTING
-            }
-            if (active.isEmpty()) {
-                stopSelfSafely()
-                return
-            }
-            var downloaded = 0L
-            var total = 0L
-            var percentSum = 0f
-            for (d in active) {
-                downloaded += d.bytesDownloaded
-                total += if (d.contentLength > 0) d.contentLength else 0L
-                percentSum += if (d.percentDownloaded > 0f) d.percentDownloaded else 0f
-            }
-            val percent = if (total > 0) {
-                ((downloaded.toDouble() / total.toDouble()) * 100).toInt()
-            } else {
-                (percentSum / active.size).toInt()
-            }
-            val text = if (total > 0) {
-                formatBytes(downloaded) + " / " + formatBytes(total) + " · 共 " + active.size + " 个任务"
-            } else {
-                "共 " + active.size + " 个任务 · " + percent + "%"
-            }
-            DownloadNotifications.notify(this@DownloadForegroundService, "离线下载", text, percent)
+    private fun pushStateNow() {
+        val tasks = TsDownloader.snapshot()
+        val active = tasks.filter {
+            it.state == Download.STATE_DOWNLOADING ||
+                it.state == Download.STATE_QUEUED ||
+                it.state == Download.STATE_RESTARTING
         }
+        if (active.isEmpty()) {
+            stopSelfSafely()
+            return
+        }
+        val downloaded = active.sumOf { if (it.bytes > 0L) it.bytes else 0L }
+        val total = active.sumOf { if (it.totalBytes > 0L) it.totalBytes else 0L }
+        val percent = if (total > 0L) {
+            ((downloaded.toDouble() / total.toDouble()) * 100).toInt()
+        } else {
+            active.sumOf { it.percent.toInt() } / active.size
+        }
+        val first = active.firstOrNull()
+        val text = if (active.size == 1 && first != null) {
+            first.vodName + " · " + first.episodeName + " · " +
+                first.doneSegments + "/" + first.totalSegments + " 片 · " + formatBytes(first.bytes)
+        } else if (total > 0L) {
+            formatBytes(downloaded) + " / " + formatBytes(total) + " · 共 " + active.size + " 个任务"
+        } else {
+            "共 " + active.size + " 个任务 · " + percent + "%"
+        }
+        DownloadNotifications.notify(this, "离线下载", text, percent)
     }
 
     private fun stopSelfSafely() {
@@ -215,7 +172,7 @@ class DownloadForegroundService : Service() {
     }
 
     private fun formatBytes(bytes: Long): String {
-        if (bytes <= 0) return "0 B"
+        if (bytes <= 0L) return "0 B"
         val kb = bytes / 1024.0
         if (kb < 1024) return String.format("%.0f KB", kb)
         val mb = kb / 1024.0
@@ -226,8 +183,6 @@ class DownloadForegroundService : Service() {
     override fun onDestroy() {
         ticker?.cancel()
         ticker = null
-        listener?.let { DownloadStore.get(this).removeListener(it) }
-        listener = null
         scope.cancel()
         DownloadNotifications.cancel(this)
         super.onDestroy()

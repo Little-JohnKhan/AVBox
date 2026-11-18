@@ -74,6 +74,10 @@ class App : Application() {
         bootMark("quickJSLoader")
         Probe.trace("boot:vodImages") { VodImages.init() }
         bootMark("vodImages")
+        Probe.trace("boot:downloadLibrary") {
+            com.github.avbox.osc.player.download.DownloadLibrary.load(this)
+        }
+        bootMark("downloadLibrary")
         Thread({
             FileUtils.ensureNoMediaMarker()
             Probe.trace("boot:cleanPlayerCache") { FileUtils.cleanPlayerCache() }

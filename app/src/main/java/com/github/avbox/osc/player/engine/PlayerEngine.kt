@@ -332,9 +332,9 @@ class PlayerEngine(
         val originPath = playPath
         currentOriginPath = originPath
         com.github.avbox.osc.player.download.CurrentPlayback.update(originPath, headers)
-        // 已下载的集复用「入队时那份精确 URL」，保证清单和分片都能命中下载缓存
-        val downloadedUrl = com.github.avbox.osc.player.download.DownloadLibrary.wrappedUrlOf(originPath)
-        playPath = downloadedUrl ?: PurifyProxy.wrap(playPath, headers)
+        // 已下载的集直接播本地成品文件：不联网、不走净化代理、不碰下载缓存
+        val localFile = com.github.avbox.osc.player.download.DownloadLibrary.localPathOf(originPath)
+        playPath = if (localFile != null) originPath else PurifyProxy.wrap(playPath, headers)
         currentPlayPath = playPath
         currentHeaders = copyHeaders(headers)
         isoSession = MediaSources.isoHeaders(currentHeaders)
@@ -348,10 +348,11 @@ class PlayerEngine(
             AppLog.i("echo-iso-play-skip-cache: $playPath")
             return
         }
-        val downloaded = com.github.avbox.osc.player.download.DownloadLibrary.isDownloaded(originPath)
-        if (downloaded) {
-            AppLog.i("echo-play-download-cache: $originPath")
-            mediaSource = mediaSources.downloadedMediaSource(playPath, copyHeaders(currentHeaders))
+        if (localFile != null) {
+            AppLog.i("echo-play-local-file: $localFile")
+            mediaSource = mediaSources.getMediaSource(
+                android.net.Uri.fromFile(java.io.File(localFile)).toString(),
+            )
         } else {
             mediaSource = mediaSources.getMediaSource(playPath, copyHeaders(currentHeaders))
         }
@@ -359,7 +360,7 @@ class PlayerEngine(
         val playCacheWanted = useDiskCache && config.playCacheEnabled()
         // 净化代理只是清单入口，分片是直连源站的，缓存照常启用
         val purifyProxy = PurifyProxy.isWrapped(playPath)
-        val mode = if (downloaded) {
+        val mode = if (localFile != null) {
             SourcePolicy.CacheMode.NONE
         } else {
             SourcePolicy.resolveCacheMode(

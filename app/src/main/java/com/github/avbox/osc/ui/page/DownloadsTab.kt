@@ -36,7 +36,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.github.avbox.osc.player.download.DownloadExporter
 import com.github.avbox.osc.player.download.DownloadRepository
 import com.github.avbox.osc.player.download.DownloadRow
 import kotlinx.coroutines.delay
@@ -45,7 +44,7 @@ import kotlinx.coroutines.launch
 /**
  * 记录页第三段：离线下载。
  *
- * 下载本身由 media3 DownloadManager 执行，这里只做展示和操作，
+ * 下载由 TsDownloader 在后台把分片直接拼成一个 .ts 文件，这里只做展示和操作，
  * 每秒轮询一次状态（任务数量不多，轮询比监听更省事也更稳）。
  */
 @Composable
@@ -150,14 +149,15 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
                     }
                 },
                 onExport = {
-                    scope.launch {
-                        val r = DownloadExporter.export(context, row.item)
-                        val msg = r.fold(
-                            { f -> "已导出：" + f.absolutePath },
-                            { e -> "导出失败：" + (e.message ?: "未知错误") },
-                        )
-                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    val id = row.item.id
+                    val path = DownloadRepository.publicFileOf(context, id)
+                        ?: DownloadRepository.localFileOf(context, id)
+                    val msg = if (path.isNullOrEmpty()) {
+                        "文件不存在，请删除后重下"
+                    } else {
+                        "已保存到：\n" + path
                     }
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 },
                 onDelete = { pendingDelete = row },
             )
@@ -242,7 +242,7 @@ private fun DownloadRowCard(
             } else if (row.isPaused) {
                 TextButton(onClick = onResume) { Text("继续") }
             } else if (row.isDone && row.downloadedBytes > 0) {
-                TextButton(onClick = onExport) { Text("导出") }
+                TextButton(onClick = onExport) { Text("文件") }
             } else if (row.isFailed || row.isDone) {
                 TextButton(onClick = onRetry) { Text("重试") }
             }
