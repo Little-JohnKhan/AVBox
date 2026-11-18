@@ -28,6 +28,7 @@ import com.github.avbox.osc.player.engine.iso.IsoPlaylistState
 import com.github.avbox.osc.player.engine.iso.withPlaylistTargets
 import com.github.avbox.osc.player.engine.iso.IsoThroughput
 import com.github.avbox.osc.player.engine.iso.M2tsDataSource
+import com.github.avbox.osc.player.download.DownloadCache
 import com.github.avbox.osc.util.AppLog
 import java.util.HashMap
 import java.util.Locale
@@ -49,6 +50,10 @@ class MediaSources(
     fun getMediaSource(uri: String, headers: Map<String, String>?): MediaSource =
         getMediaSource(uri, headers, false)
 
+    /** 已下载内容专用：数据从下载缓存读，缓存缺失才回源 */
+    fun downloadedMediaSource(uri: String, headers: Map<String, String>?): MediaSource =
+        getMediaSource(uri, headers, false, true, inferContentType(uri, headers), downloadCache = true)
+
     fun getMediaSource(uri: String, isCache: Boolean): MediaSource =
         getMediaSource(uri, null, isCache)
 
@@ -67,6 +72,7 @@ class MediaSources(
         isCache: Boolean,
         useDefaultCacheKey: Boolean,
         contentType: Int,
+        downloadCache: Boolean = false,
     ): MediaSource {
         val contentUri = Uri.parse(uri)
         if ("rtsp" == contentUri.scheme) {
@@ -78,7 +84,13 @@ class MediaSources(
         val requestHeaders = toRequestHeaders(headers)
         val mediaItem = buildMediaItem(uri, headers)
         var factory: DataSource.Factory = createDataSourceFactory(requestHeaders)
-        if (isCache) {
+        if (downloadCache) {
+            // 已下载的内容：先读下载缓存，缺片再回源
+            factory = CacheDataSource.Factory()
+                .setCache(DownloadCache.get(appContext))
+                .setUpstreamDataSourceFactory(factory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        } else if (isCache) {
             factory = cacheDataSourceFactory(factory, requestHeaders, useDefaultCacheKey)
         }
         return when (contentType) {

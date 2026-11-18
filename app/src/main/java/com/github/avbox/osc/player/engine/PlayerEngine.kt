@@ -346,17 +346,27 @@ class PlayerEngine(
             AppLog.i("echo-iso-play-skip-cache: $playPath")
             return
         }
-        mediaSource = mediaSources.getMediaSource(playPath, copyHeaders(currentHeaders))
+        val downloaded = com.github.avbox.osc.player.download.DownloadLibrary.isDownloaded(originPath)
+        if (downloaded) {
+            AppLog.i("echo-play-download-cache: $originPath")
+            mediaSource = mediaSources.downloadedMediaSource(playPath, copyHeaders(currentHeaders))
+        } else {
+            mediaSource = mediaSources.getMediaSource(playPath, copyHeaders(currentHeaders))
+        }
         val preloadTarget = config.preloadTargetChecker(originPath, headers)
         val playCacheWanted = useDiskCache && config.playCacheEnabled()
         // 净化代理只是清单入口，分片是直连源站的，缓存照常启用
         val purifyProxy = PurifyProxy.isWrapped(playPath)
-        val mode = SourcePolicy.resolveCacheMode(
-            isLocalProxyUrl = SourcePolicy.isLocalProxyUrl(playPath) && !purifyProxy,
-            isRtmp = SourcePolicy.isRtmp(playPath),
-            preloadTarget = preloadTarget,
-            playCacheWanted = playCacheWanted,
-        )
+        val mode = if (downloaded) {
+            SourcePolicy.CacheMode.NONE
+        } else {
+            SourcePolicy.resolveCacheMode(
+                isLocalProxyUrl = SourcePolicy.isLocalProxyUrl(playPath) && !purifyProxy,
+                isRtmp = SourcePolicy.isRtmp(playPath),
+                preloadTarget = preloadTarget,
+                playCacheWanted = playCacheWanted,
+            )
+        }
         if (mode == SourcePolicy.CacheMode.NONE) {
             if (preloadTarget || playCacheWanted) {
                 AppLog.i(

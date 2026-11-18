@@ -72,6 +72,7 @@ object DownloadRepository {
         } catch (th: Throwable) {
             AppLog.e("DownloadRepository", "query index failed", th)
         }
+        DownloadLibrary.updateFrom(items, byId)
         items.mapNotNull { item ->
             val d = byId[item.id] ?: return@mapNotNull null
             DownloadRow(

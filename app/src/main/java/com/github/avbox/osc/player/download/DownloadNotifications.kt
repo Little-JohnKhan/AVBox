@@ -125,6 +125,9 @@ class DownloadForegroundService : Service() {
                 download: Download,
                 finalException: Exception?,
             ) {
+                if (download.state == Download.STATE_COMPLETED) {
+                    DownloadLibrary.refreshAsync(this@DownloadForegroundService)
+                }
                 pushState()
             }
 
