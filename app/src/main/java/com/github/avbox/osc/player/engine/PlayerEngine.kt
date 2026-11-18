@@ -327,6 +327,9 @@ class PlayerEngine(
                 AppLog.i("echo-rtmp-live-flag: $playPath")
             }
         }
+        // m3u8 先过一层本地净化代理：只换清单（剔广告分片），分片仍由播放器直连源站
+        val originPath = playPath
+        playPath = PurifyProxy.wrap(playPath, headers)
         currentPlayPath = playPath
         currentHeaders = copyHeaders(headers)
         isoSession = MediaSources.isoHeaders(currentHeaders)
@@ -341,10 +344,12 @@ class PlayerEngine(
             return
         }
         mediaSource = mediaSources.getMediaSource(playPath, copyHeaders(currentHeaders))
-        val preloadTarget = config.preloadTargetChecker(playPath, headers)
+        val preloadTarget = config.preloadTargetChecker(originPath, headers)
         val playCacheWanted = useDiskCache && config.playCacheEnabled()
+        // 净化代理只是清单入口，分片是直连源站的，缓存照常启用
+        val purifyProxy = PurifyProxy.isWrapped(playPath)
         val mode = SourcePolicy.resolveCacheMode(
-            isLocalProxyUrl = SourcePolicy.isLocalProxyUrl(playPath),
+            isLocalProxyUrl = SourcePolicy.isLocalProxyUrl(playPath) && !purifyProxy,
             isRtmp = SourcePolicy.isRtmp(playPath),
             preloadTarget = preloadTarget,
             playCacheWanted = playCacheWanted,

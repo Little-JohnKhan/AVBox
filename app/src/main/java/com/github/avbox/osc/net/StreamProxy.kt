@@ -3,6 +3,7 @@ package com.github.avbox.osc.net
 import com.github.avbox.osc.net.SuperParse
 import com.github.avbox.osc.util.AppLog
 import com.github.avbox.osc.util.LocalAddress
+import com.github.avbox.osc.util.M3u8Purifier
 
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -62,7 +63,11 @@ object StreamProxy {
                         assert(response.body != null)
                         val respContent = response.body.string()
                         val finalUrl = response.request.url.toString()
-                        val m3u8Content = processM3u8Content(respContent, finalUrl, params)
+                        val m3u8Content = if ("1" == params["pure"]) {
+                            purifyM3u8(respContent, finalUrl, params)
+                        } else {
+                            processM3u8Content(respContent, finalUrl, params)
+                        }
                         result[0] = 200
                         result[1] = "application/vnd.apple.mpegurl"
                         result[2] = ByteArrayInputStream(m3u8Content.toByteArray(Charsets.UTF_8))
@@ -162,6 +167,107 @@ object StreamProxy {
             System.err.println("网络请求异常：" + e.message) // i18n: keep(异常消息,只进日志)
             throw e
         }
+    }
+
+    /**
+     * 净化模式（pure=1）：只净化清单，分片保持直连源站。
+     *
+     * 与 processM3u8Content 的区别——后者把每个分片都改写成 127.0.0.1 代理，
+     * 那样 media3 的磁盘缓存会因为地址是回环而整条失效，每片还要多绕一次本地转发。
+     * 这里只把相对路径绝对化，分片仍由播放器直连，请求头由 DataSource.Factory 负责带。
+     *
+     * 必须绝对化的原因：清单本身是通过 127.0.0.1/proxy?... 请求回来的，
+     * media3 会拿这个代理地址当 base 去解析相对路径，不绝对化就会把分片拼到代理上。
+     */
+    private fun purifyM3u8(content: String?, baseUrl: String, params: Map<String, String>): String {
+        if (content == null) return ""
+        var text = M3u8Purifier.stripBom(content)
+        val report = M3u8Purifier.Report()
+        val purified = M3u8Purifier.purify(text, baseUrl, report)
+        if (purified != null) {
+            text = purified
+            AppLog.i("echo-purify-hit: " + report.toString())
+        } else {
+            AppLog.i("echo-purify-skip: " + report.toString())
+        }
+
+        val lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
+        val sb = StringBuilder()
+        var nextIsVariant = false
+        for (raw in lines) {
+            val line = raw.trim { it <= ' ' }
+            if (line.isEmpty()) {
+                sb.append('\n')
+                continue
+            }
+            if (line.startsWith("#")) {
+                sb.append(rewriteUriAbsolute(line, baseUrl, params)).append('\n')
+                if (line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
+                    nextIsVariant = true
+                }
+                continue
+            }
+            val absolute = attachAuthQuery(baseUrl, M3u8Purifier.resolve(baseUrl, line))
+            val isVariant = nextIsVariant || isM3u8Url(absolute)
+            nextIsVariant = false
+            sb.append(if (isVariant) localM3u8Proxy(absolute, params) else absolute).append('\n')
+        }
+        return sb.toString()
+    }
+
+    /** 绝对化 #EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等标签里的 URI="..."，子清单仍走净化代理 */
+    private fun rewriteUriAbsolute(line: String, baseUrl: String, params: Map<String, String>): String {
+        val matcher = URI_ATTR.matcher(line)
+        val buffer = StringBuffer()
+        while (matcher.find()) {
+            var uri = M3u8Purifier.resolve(baseUrl, matcher.group(1))
+            if (isM3u8Url(uri)) uri = localM3u8Proxy(uri, params)
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement("URI=\"" + uri + "\""))
+        }
+        matcher.appendTail(buffer)
+        return buffer.toString()
+    }
+
+    /** 把子清单（多码率 master 或 #EXT-X-MEDIA）再包一层净化代理，下一级清单同样要被净化 */
+    private fun localM3u8Proxy(url: String, params: Map<String, String>): String {
+        return try {
+            val base = LocalAddress.get()
+            if (base.isEmpty()) return url
+            base + "proxy?go=live&type=m3u8&pure=1" + headerQuery(params) + "&url=" + URLEncoder.encode(url, "UTF-8")
+        } catch (e: Exception) {
+            url
+        }
+    }
+
+    /**
+     * 清单地址带签名时（?auth_key= / ?token=），相对路径解析出的分片地址会丢掉这部分 query，
+     * 源站直接 403。只继承签名类参数，业务参数不继承，避免把源站搞晕。
+     */
+    private fun attachAuthQuery(baseUrl: String?, target: String): String {
+        if (target.isEmpty()) return target
+        if (target.indexOf('?') >= 0) return target
+        if (baseUrl == null) return target
+        val q = baseUrl.indexOf('?')
+        if (q < 0 || q == baseUrl.length - 1) return target
+        val sb = StringBuilder()
+        for (pair in baseUrl.substring(q + 1).split("&")) {
+            if (pair.isEmpty()) continue
+            val eq = pair.indexOf('=')
+            if (eq <= 0) continue
+            val name = pair.substring(0, eq).lowercase()
+            if (!isAuthQuery(name)) continue
+            if (sb.isNotEmpty()) sb.append('&')
+            sb.append(pair)
+        }
+        if (sb.isEmpty()) return target
+        return target + "?" + sb.toString()
+    }
+
+    private fun isAuthQuery(name: String): Boolean {
+        return name.contains("auth") || name.contains("token") || name.contains("sign") ||
+                name.contains("expire") || name.contains("secret") || name.contains("stamp") ||
+                name == "key" || name == "time" || name == "t" ||
+                name == "wssecret" || name == "wstime" || name == "txsecret"
     }
 
     private fun processM3u8Content(m3u8Content: String?, m3u8Url: String, params: Map<String, String>): String {
