@@ -1,9 +1,14 @@
 package com.github.avbox.osc.ui.page
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -70,6 +76,8 @@ internal fun DownloadsTab(
     onSelectedChange: (Set<String>) -> Unit = {},
     deleteTick: Int = 0,
     onDeleteDone: () -> Unit = {},
+    clearTick: Int = 0,
+    onClearDone: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -78,16 +86,19 @@ internal fun DownloadsTab(
     var loaded by remember { mutableStateOf(false) }
     var hasAllFiles by remember { mutableStateOf(true) }
     var handledTick by remember { mutableStateOf(0) }
+    var handledClearTick by remember { mutableStateOf(0) }
     var pendingDeleteTask by remember { mutableStateOf<DownloadRow?>(null) }
     var pendingDeleteFile by remember { mutableStateOf<LocalVideo?>(null) }
 
     LaunchedEffect(Unit) {
         var tick = 0
         while (true) {
+            val granted = LocalLibrary.hasAllFilesAccess()
+            val justGranted = granted && !hasAllFiles
+            hasAllFiles = granted
             rows = DownloadRepository.list(context).filterNot { it.isDone }
-            if (tick % 3 == 0) {
+            if (tick % 3 == 0 || justGranted) {
                 files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
-                hasAllFiles = LocalLibrary.hasAllFilesAccess()
             }
             loaded = true
             tick++
@@ -123,8 +134,49 @@ internal fun DownloadsTab(
         onDeleteDone()
     }
 
+    // 顶栏「清空下载」确认后触发；删除全部任务与目录文件
+    LaunchedEffect(clearTick) {
+        if (clearTick <= 0 || clearTick <= handledClearTick) return@LaunchedEffect
+        handledClearTick = clearTick
+        val removed = withContext(Dispatchers.IO) {
+            DownloadRepository.list(context).forEach { row ->
+                try {
+                    DownloadRepository.remove(context, row.item.id)
+                } catch (ignored: Throwable) {
+                }
+            }
+            var count = 0
+            LocalLibrary.scan().forEach { video ->
+                val ok = try {
+                    video.file.delete()
+                } catch (ignored: Throwable) {
+                    false
+                }
+                if (ok) count++
+            }
+            count
+        }
+        rows = DownloadRepository.list(context).filterNot { it.isDone }
+        files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
+        Toast.makeText(context, "已清空 " + removed + " 个文件", Toast.LENGTH_SHORT).show()
+        onClearDone()
+    }
+
     fun toggle(key: String) {
         onSelectedChange(if (key in selected) selected - key else selected + key)
+    }
+
+    if (loaded && !hasAllFiles && rows.isEmpty() && !editMode) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 24.dp + navStart, end = 24.dp, bottom = navBottom),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            AllFilesPermissionCard(context)
+        }
+        return
     }
 
     if (loaded && rows.isEmpty() && files.isEmpty() && !editMode) {
@@ -194,11 +246,7 @@ internal fun DownloadsTab(
         }
         if (!hasAllFiles) {
             item(key = "file-permission") {
-                Text(
-                    text = "没有「所有文件访问权限」，扫不到目录里的文件。请到系统设置 → 应用 → AVBox → 权限里允许访问所有文件。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                AllFilesPermissionCard(context)
             }
         }
         items(files, key = { "file:" + it.path }) { file ->
@@ -269,6 +317,50 @@ private fun SectionTitle(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
     )
+}
+
+@Composable
+private fun AllFilesPermissionCard(context: Context) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.errorContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable { openAllFilesSettings(context) },
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "需要「所有文件访问权限」",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Text(
+                text = "没有这个权限就扫不到 Download/AVBox 里的文件，新下载也会失败。点这里去系统设置开启。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+    }
+}
+
+private fun openAllFilesSettings(context: Context) {
+    val pkgUri = Uri.parse("package:" + context.packageName)
+    val candidates = listOf(
+        Intent("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION", pkgUri),
+        Intent("android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION"),
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri),
+    )
+    for (candidate in candidates) {
+        try {
+            context.startActivity(candidate.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        } catch (ignored: Throwable) {
+        }
+    }
+    Toast.makeText(context, "请到系统设置 → 应用 → AVBox → 权限里开启「所有文件访问权限」", Toast.LENGTH_LONG).show()
 }
 
 @Composable

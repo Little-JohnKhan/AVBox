@@ -58,6 +58,7 @@ private sealed interface RecordsDialog {
     data object DeleteSelectedHistory : RecordsDialog
     data object DeleteSelectedCollect : RecordsDialog
     data object DeleteSelectedDownload : RecordsDialog
+    data object ClearDownload : RecordsDialog
     data class DeleteHistoryItem(val item: VodInfo) : RecordsDialog
     data class DeleteCollectItem(val item: VodCollect) : RecordsDialog
 }
@@ -86,6 +87,7 @@ fun RecordsPage(
     var downloadEdit by rememberSaveable { mutableStateOf(false) }
     var downloadSelected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var downloadDeleteTick by remember { mutableStateOf(0) }
+    var downloadClearTick by remember { mutableStateOf(0) }
 
     val historyListState = rememberLazyGridState()
     val collectListState = rememberLazyGridState()
@@ -207,16 +209,16 @@ fun RecordsPage(
                         }
                         ManageActionIcon(
                             iconRes = R.drawable.ic_delete,
-                            contentDescription = if (isHistory) {
-                                stringResource(R.string.history_clear)
-                            } else {
-                                stringResource(R.string.collect_clear)
+                            contentDescription = when (mode) {
+                                RecordsMode.History -> stringResource(R.string.history_clear)
+                                RecordsMode.Collect -> stringResource(R.string.collect_clear)
+                                RecordsMode.Download -> "清空下载"
                             },
                             onClick = {
-                                if (!isDownload) dialog = if (isHistory) {
-                                    RecordsDialog.ClearHistory
-                                } else {
-                                    RecordsDialog.ClearCollect
+                                when (mode) {
+                                    RecordsMode.History -> dialog = RecordsDialog.ClearHistory
+                                    RecordsMode.Collect -> dialog = RecordsDialog.ClearCollect
+                                    RecordsMode.Download -> dialog = RecordsDialog.ClearDownload
                                 }
                             },
                         )
@@ -300,9 +302,14 @@ fun RecordsPage(
                         selected = downloadSelected,
                         onSelectedChange = { downloadSelected = it },
                         deleteTick = downloadDeleteTick,
+                        clearTick = downloadClearTick,
                         onDeleteDone = {
                             downloadSelected = emptySet()
-                            downloadDeleteTick = 0
+                            downloadEdit = false
+                        },
+                        onClearDone = {
+                            downloadSelected = emptySet()
+                            downloadEdit = false
                         },
                     )
                 }
@@ -324,6 +331,16 @@ fun RecordsPage(
             title = stringResource(R.string.collect_clear),
             text = stringResource(R.string.collect_clear_message),
             onConfirm = { collectVm.deleteAll() },
+            onDismiss = { dialog = null },
+        )
+
+        RecordsDialog.ClearDownload -> ConfirmDeleteDialog(
+            title = "清空下载",
+            text = "将删除 Download/AVBox 下的全部文件和未完成的下载任务，删除后不可恢复。",
+            onConfirm = {
+                downloadClearTick++
+                dialog = null
+            },
             onDismiss = { dialog = null },
         )
 
