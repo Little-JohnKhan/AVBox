@@ -55,8 +55,9 @@ class LocalPlaybackHost(
         activity.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
     private var systemBrightness = -1f
-    private var lastBrightness = Float.NaN
-    private var lastVolume = Int.MIN_VALUE
+    /** 手势开始那一刻的亮度/音量；滑动给的是累计位移，必须相对起点算，不能逐帧叠加 */
+    private var startBrightness = Float.NaN
+    private var startVolume = Int.MIN_VALUE
     private var seekBase = 0L
     private var seekTarget = 0L
     private var hintAt = 0L
@@ -81,9 +82,10 @@ class LocalPlaybackHost(
 
     fun sync() {
         val durationMs = player.duration.coerceAtLeast(0L)
-        state.updateDuration((durationMs / 1000L).toInt())
+        // PlayerUiState 的 duration/position 单位是毫秒（PlayerUtils.stringForTime 内部再除 1000）
+        state.updateDuration(durationMs.toInt())
         if (!state.dragging) {
-            state.updatePosition((player.currentPosition.coerceAtLeast(0L) / 1000L).toInt())
+            state.updatePosition(player.currentPosition.coerceAtLeast(0L).toInt())
         }
         state.updateBufferedPercent(
             if (durationMs > 0L) {
@@ -158,8 +160,8 @@ class LocalPlaybackHost(
     /** 手势开始时的环境快照：方向判定需要这些字段 */
     fun buildSession(width: Int, height: Int, downY: Float): VideoGestureSession {
         // 新一轮手势：重置亮度/音量基准
-        lastBrightness = Float.NaN
-        lastVolume = Int.MIN_VALUE
+        startBrightness = Float.NaN
+        startVolume = Int.MIN_VALUE
         val screenWidth = activity.resources.displayMetrics.widthPixels
         return VideoGestureSession(
             inPlayback = true,
@@ -282,7 +284,8 @@ class LocalPlaybackHost(
     override fun onSeekPreview(progress: Int) {
         val durationMs = player.duration.coerceAtLeast(0L)
         if (durationMs <= 0L) return
-        val target = (durationMs * progress.coerceIn(0, 100) / 100L)
+        // 底部进度条的 progress 是 0..1000（PlayerBottomBar 的 SEEK_MAX）
+        val target = (durationMs * progress.coerceIn(0, 1000) / 1000L)
         seekTarget = target
         state.updateSeekPreviewPositionMs(target)
         touchControls()
@@ -290,10 +293,10 @@ class LocalPlaybackHost(
 
     override fun onSeekFinished(progress: Int) {
         val durationMs = player.duration.coerceAtLeast(0L)
-        val target = if (durationMs > 0L) durationMs * progress.coerceIn(0, 100) / 100L else seekTarget
+        val target = if (durationMs > 0L) durationMs * progress.coerceIn(0, 1000) / 1000L else seekTarget
         player.seekTo(target)
         state.updateDragging(false)
-        state.updatePosition((target / 1000L).toInt())
+        state.updatePosition(target.toInt())
     }
 
     override fun onSeekCancelled() {
@@ -304,7 +307,7 @@ class LocalPlaybackHost(
         val durationMs = player.duration.coerceAtLeast(0L)
         val target = (player.currentPosition + dir * 10_000L).coerceIn(0L, if (durationMs > 0L) durationMs else Long.MAX_VALUE)
         player.seekTo(target)
-        state.updatePosition((target / 1000L).toInt())
+        state.updatePosition(target.toInt())
         touchControls()
     }
 
@@ -312,7 +315,7 @@ class LocalPlaybackHost(
         val durationMs = player.duration.coerceAtLeast(0L)
         val target = (player.currentPosition + deltaMs).coerceIn(0L, if (durationMs > 0L) durationMs else Long.MAX_VALUE)
         player.seekTo(target)
-        state.updatePosition((target / 1000L).toInt())
+        state.updatePosition(target.toInt())
         touchControls()
     }
 
@@ -371,7 +374,7 @@ class LocalPlaybackHost(
     override fun onSeekCommit() {
         player.seekTo(seekTarget)
         state.updateDragging(false)
-        state.updatePosition((seekTarget / 1000L).toInt())
+        state.updatePosition(seekTarget.toInt())
         state.updateSeekHintVisible(false)
     }
 
@@ -382,7 +385,7 @@ class LocalPlaybackHost(
 
     override fun onBrightnessSlide(totalDeltaY: Float) {
         val height = maxOf(activity.resources.displayMetrics.heightPixels, 1)
-        if (lastBrightness.isNaN()) {
+        if (startBrightness.isNaN()) {
             if (systemBrightness < 0f) {
                 systemBrightness = try {
                     Settings.System.getInt(
@@ -393,10 +396,10 @@ class LocalPlaybackHost(
                     0.5f
                 }
             }
-            lastBrightness = systemBrightness.coerceIn(0.01f, 1f)
+            startBrightness = systemBrightness.coerceIn(0.01f, 1f)
         }
-        val target = (lastBrightness - (totalDeltaY / height) * 1.4f).coerceIn(0.01f, 1f)
-        lastBrightness = target
+        // 滑满屏高 ≈ 变化 80%，不会一滑到底
+        val target = (startBrightness - (totalDeltaY / height) * 0.8f).coerceIn(0.01f, 1f)
         try {
             val lp: WindowManager.LayoutParams = activity.window.attributes
             lp.screenBrightness = target
@@ -413,17 +416,15 @@ class LocalPlaybackHost(
     override fun onVolumeSlide(totalDeltaY: Float) {
         val am = audioManager ?: return
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        if (lastVolume == Int.MIN_VALUE) {
-            lastVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        if (startVolume == Int.MIN_VALUE) {
+            startVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
         }
         val height = maxOf(activity.resources.displayMetrics.heightPixels, 1)
-        val target = (lastVolume - (totalDeltaY / height) * max * 1.6f).toInt().coerceIn(0, max)
-        if (target != lastVolume) {
-            lastVolume = target
-            try {
-                am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
-            } catch (ignored: Throwable) {
-            }
+        // 滑满屏高 ≈ 音量走 80% 量程
+        val target = (startVolume - (totalDeltaY / height) * max * 0.8f).toInt().coerceIn(0, max)
+        try {
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+        } catch (ignored: Throwable) {
         }
         state.updateSlideHintBrightness(false)
         state.updateSlideHintText((target * 100 / max).toString() + "%")

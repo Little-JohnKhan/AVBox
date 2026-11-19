@@ -1,20 +1,28 @@
 package com.github.avbox.osc.ui
 
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -30,18 +40,16 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.github.avbox.osc.player.download.LocalVideo
-import com.github.avbox.osc.ui.player.PlayerBottomBar
-import com.github.avbox.osc.ui.player.PlayerTopBar
 import com.github.avbox.osc.ui.player.videoGestureLayer
 import kotlinx.coroutines.delay
 
 /**
- * 本地播放界面：顶栏、底栏、手势层全部复用在线播放器那一套实现，
- * 只是把状态源从 PlaybackSession 换成 ExoPlayer（见 [LocalPlaybackHost]）。
+ * 本地播放界面。
  *
- * 选集面板按你的要求直接列 Download/AVBox 里的文件。
+ * 手势层直接用项目的 [videoGestureLayer] / VideoGestureHandler（左右进度、左侧亮度、
+ * 右侧音量、双击播放暂停、长按倍速），UI 只保留需要的几个入口：
+ * 关闭、投屏、上一集、播放暂停、下一集、选集。选集是右侧半遮板的网格。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun LocalPlayerScreen(
     player: ExoPlayer,
@@ -52,6 +60,17 @@ internal fun LocalPlayerScreen(
 ) {
     val state = host.state
     var showEpisodes by remember { mutableStateOf(false) }
+    var dragging by remember { mutableStateOf(false) }
+    var dragValue by remember { mutableStateOf(0f) }
+
+    // 单击要等双击超时后才能确认，这是 videoGestureLayer 的约定
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val tapConfirm = remember {
+        Runnable { host.gestureHandler.markSingleTapConfirmed() }
+    }
+    DisposableEffect(Unit) {
+        onDispose { mainHandler.removeCallbacks(tapConfirm) }
+    }
 
     LaunchedEffect(player) {
         while (true) {
@@ -63,6 +82,9 @@ internal fun LocalPlayerScreen(
     LaunchedEffect(currentIndex) {
         host.onTitleChanged(videos.getOrNull(currentIndex)?.name ?: "本地视频")
     }
+
+    val durationMs = player.duration.coerceAtLeast(0L)
+    val positionMs = player.currentPosition.coerceAtLeast(0L)
 
     Box(
         modifier = Modifier
@@ -80,7 +102,6 @@ internal fun LocalPlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        // 手势层：方向判定、双击/长按时序都是在线播放器那份 VideoGestureHandler
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -89,20 +110,117 @@ internal fun LocalPlayerScreen(
                     sessionProvider = { size, downY ->
                         host.buildSession(size.width, size.height, downY)
                     },
-                    onTapPending = { },
+                    onTapPending = {
+                        mainHandler.removeCallbacks(tapConfirm)
+                        mainHandler.postDelayed(tapConfirm, host.gestureHandler.doubleTapTimeoutMs)
+                    },
                 ),
         )
 
-        if (state.controlsVisible) {
-            Box(modifier = Modifier.align(Alignment.TopCenter)) {
-                PlayerTopBar(state, host)
+        if (state.controlsVisible && !showEpisodes) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)),
+                    )
+                    .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { host.onBackClicked() }) {
+                    Text("✕", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = state.title,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = listOf(state.videoSize, state.videoQuality)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" · "),
+                        color = Color(0x99FFFFFF),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                }
+                TextButton(onClick = { host.onCastClicked() }) {
+                    Text("投屏", color = Color.White)
+                }
             }
-            Box(modifier = Modifier.align(Alignment.BottomCenter)) {
-                PlayerBottomBar(state, host)
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))),
+                    )
+                    .padding(start = 12.dp, end = 12.dp, top = 20.dp, bottom = 8.dp),
+            ) {
+                Text(
+                    text = fmtTime(if (dragging) (dragValue * durationMs).toLong() else positionMs) +
+                        " / " + fmtTime(durationMs),
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Slider(
+                    value = if (durationMs > 0L) {
+                        if (dragging) dragValue else (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    },
+                    onValueChange = {
+                        dragging = true
+                        dragValue = it
+                    },
+                    onValueChangeFinished = {
+                        if (durationMs > 0L) {
+                            player.seekTo((dragValue.toDouble() * durationMs).toLong())
+                        }
+                        dragging = false
+                        host.keepControlsAlive()
+                    },
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        enabled = currentIndex > 0,
+                        onClick = { onSelect(currentIndex - 1) },
+                    ) {
+                        Text("上一集", color = if (currentIndex > 0) Color.White else Color(0x55FFFFFF))
+                    }
+                    TextButton(onClick = { host.onPlayPauseClicked() }) {
+                        Text(
+                            if (player.isPlaying) "暂停" else "播放",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    TextButton(
+                        enabled = currentIndex + 1 < videos.size,
+                        onClick = { onSelect(currentIndex + 1) },
+                    ) {
+                        Text(
+                            "下一集",
+                            color = if (currentIndex + 1 < videos.size) Color.White else Color(0x55FFFFFF),
+                        )
+                    }
+                    TextButton(onClick = { showEpisodes = true }) {
+                        Text("选集", color = Color.White)
+                    }
+                }
             }
         }
 
-        // 手势提示
         if (state.seekHintVisible) {
             HintText(state.seekHintText, Modifier.align(Alignment.Center))
         }
@@ -112,54 +230,89 @@ internal fun LocalPlayerScreen(
         if (state.speedBoostVisible) {
             HintText(fmtSpeed(state.speedBoostValue) + " 倍速", Modifier.align(Alignment.Center))
         }
-    }
 
-    if (showEpisodes) {
-        EpisodesSheet(
-            videos = videos,
-            currentIndex = currentIndex,
-            onDismiss = { showEpisodes = false },
-            onSelect = { i ->
-                showEpisodes = false
-                onSelect(i)
-            },
-        )
-    }
-
-    // 选集按钮走 PlayerActions.onEpisodeClicked，这里把请求接回来打开面板
-    LaunchedEffect(host) {
-        host.onEpisodesRequested = { showEpisodes = true }
+        if (showEpisodes) {
+            EpisodePanel(
+                videos = videos,
+                currentIndex = currentIndex,
+                title = state.title,
+                onDismiss = { showEpisodes = false },
+                onSelect = { i ->
+                    showEpisodes = false
+                    onSelect(i)
+                },
+            )
+        }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** 右侧半遮板：和在线播放器的选集面板同一套视觉（深底 + 两列网格 + 亮蓝选中） */
 @Composable
-private fun EpisodesSheet(
+private fun EpisodePanel(
     videos: List<LocalVideo>,
     currentIndex: Int,
+    title: String,
     onDismiss: () -> Unit,
     onSelect: (Int) -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Text(
-            text = "共 " + videos.size + " 个文件",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(start = 20.dp, bottom = 8.dp),
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0x66000000))
+                .clickable { onDismiss() },
         )
-        LazyColumn(modifier = Modifier.heightIn(max = 460.dp)) {
-            itemsIndexed(videos) { i, video: LocalVideo ->
-                ListItem(
-                    headlineContent = {
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+                .fillMaxWidth(0.56f)
+                .background(Color(0xF0121A2B))
+                .padding(horizontal = 14.dp, vertical = 16.dp),
+        ) {
+            Text(
+                text = title,
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "共 " + videos.size + " 个文件",
+                color = Color(0x99FFFFFF),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+            )
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                itemsIndexed(videos) { i, video ->
+                    val selected = i == currentIndex
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) Color(0xFF2D7FF9) else Color(0x33FFFFFF))
+                            .border(
+                                width = 1.dp,
+                                color = if (selected) Color(0x00000000) else Color(0x33FFFFFF),
+                                shape = RoundedCornerShape(10.dp),
+                            )
+                            .clickable { onSelect(i) }
+                            .padding(horizontal = 10.dp, vertical = 14.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
                         Text(
-                            text = if (i == currentIndex) "▶ " + video.name else video.name,
+                            text = shortName(video.name),
+                            color = if (selected) Color.White else Color(0xFFE0E0E0),
+                            style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            fontWeight = if (i == currentIndex) FontWeight.SemiBold else FontWeight.Normal,
                         )
-                    },
-                    supportingContent = { Text(fmtSize(video.size)) },
-                    modifier = Modifier.clickable { onSelect(i) },
-                )
+                    }
+                }
             }
         }
     }
@@ -177,6 +330,11 @@ private fun HintText(text: String, modifier: Modifier) {
     )
 }
 
+private fun shortName(name: String): String {
+    val dot = name.lastIndexOf('.')
+    return if (dot > 0) name.substring(0, dot) else name
+}
+
 private fun fmtSpeed(speed: Float): String {
     return if (speed == speed.toInt().toFloat()) {
         speed.toInt().toString() + "x"
@@ -185,11 +343,14 @@ private fun fmtSpeed(speed: Float): String {
     }
 }
 
-private fun fmtSize(bytes: Long): String {
-    if (bytes <= 0L) return "0 B"
-    val kb = bytes / 1024.0
-    if (kb < 1024) return String.format("%.0f KB", kb)
-    val mb = kb / 1024.0
-    if (mb < 1024) return String.format("%.1f MB", mb)
-    return String.format("%.2f GB", mb / 1024.0)
+private fun fmtTime(ms: Long): String {
+    val total = (ms / 1000L).coerceAtLeast(0L)
+    val h = total / 3600L
+    val m = (total % 3600L) / 60L
+    val s = total % 60L
+    return if (h > 0L) {
+        String.format("%d:%02d:%02d", h, m, s)
+    } else {
+        String.format("%02d:%02d", m, s)
+    }
 }
