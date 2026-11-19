@@ -58,6 +58,7 @@ private sealed interface RecordsDialog {
     data object ClearCollect : RecordsDialog
     data object DeleteSelectedHistory : RecordsDialog
     data object DeleteSelectedCollect : RecordsDialog
+    data object DeleteSelectedDownload : RecordsDialog
     data class DeleteHistoryItem(val item: VodInfo) : RecordsDialog
     data class DeleteCollectItem(val item: VodCollect) : RecordsDialog
 }
@@ -182,9 +183,9 @@ fun RecordsPage(
                             contentDescription = stringResource(R.string.common_delete_selected),
                             enabled = selectedCount > 0,
                             onClick = {
-                                if (isDownload) {
-                                    downloadDeleteTick++
-                                } else dialog = if (isHistory) {
+                                dialog = if (isDownload) {
+                                    RecordsDialog.DeleteSelectedDownload
+                                } else if (isHistory) {
                                     RecordsDialog.DeleteSelectedHistory
                                 } else {
                                     RecordsDialog.DeleteSelectedCollect
@@ -246,8 +247,8 @@ fun RecordsPage(
                 ),
                 selectedValue = mode,
                 onOptionSelected = { mode = it },
-                style = SegmentStyle.Connected,
-                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                style = SegmentStyle.Track,
+                containerColor = MaterialTheme.colorScheme.surfaceBright,
                 pressMorph = true,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -302,7 +303,10 @@ fun RecordsPage(
                         selected = downloadSelected,
                         onSelectedChange = { downloadSelected = it },
                         deleteTick = downloadDeleteTick,
-                        onDeleteDone = { downloadSelected = emptySet() },
+                        onDeleteDone = {
+                            downloadSelected = emptySet()
+                            downloadDeleteTick = 0
+                        },
                     )
                 }
             }
@@ -323,6 +327,16 @@ fun RecordsPage(
             title = stringResource(R.string.collect_clear),
             text = stringResource(R.string.collect_clear_message),
             onConfirm = { collectVm.deleteAll() },
+            onDismiss = { dialog = null },
+        )
+
+        RecordsDialog.DeleteSelectedDownload -> ConfirmDeleteDialog(
+            title = stringResource(R.string.common_delete_selected),
+            text = "已选 " + downloadSelected.size + " 项，删除后不可恢复。",
+            onConfirm = {
+                downloadDeleteTick++
+                dialog = null
+            },
             onDismiss = { dialog = null },
         )
 

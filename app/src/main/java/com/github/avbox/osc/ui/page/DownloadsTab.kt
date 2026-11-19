@@ -4,7 +4,6 @@ import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,7 +21,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -60,9 +58,8 @@ import java.util.Locale
 /**
  * 记录页第三段：离线下载（文件夹视图）。
  *
- * 编辑态（多选 / 删除选中）由记录页顶栏的两个按钮驱动：
- * 选中项用 "task:<id>" / "file:<绝对路径>" 作键，删除时按前缀分派。
- * 单条删除走长按确认弹窗，行内不再放删除按钮。
+ * 编辑态由记录页顶栏的铅笔/垃圾桶按钮驱动，选中键为 "task:<id>" / "file:<路径>"。
+ * 单条删除走长按确认弹窗，行内不再有删除按钮。
  */
 @Composable
 internal fun DownloadsTab(
@@ -79,8 +76,8 @@ internal fun DownloadsTab(
     var rows by remember { mutableStateOf<List<DownloadRow>>(emptyList()) }
     var files by remember { mutableStateOf<List<LocalVideo>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
-    var manualUrl by remember { mutableStateOf("") }
     var hasAllFiles by remember { mutableStateOf(true) }
+    var handledTick by remember { mutableStateOf(0) }
     var pendingDeleteTask by remember { mutableStateOf<DownloadRow?>(null) }
     var pendingDeleteFile by remember { mutableStateOf<LocalVideo?>(null) }
 
@@ -98,10 +95,15 @@ internal fun DownloadsTab(
         }
     }
 
-    // 顶栏「删除选中」触发
+    // 顶栏「删除选中」确认后触发；同一 tick 只处理一次
     LaunchedEffect(deleteTick) {
-        if (deleteTick <= 0) return@LaunchedEffect
+        if (deleteTick <= 0 || deleteTick <= handledTick) return@LaunchedEffect
+        handledTick = deleteTick
         val keys = selected.toList()
+        if (keys.isEmpty()) {
+            onDeleteDone()
+            return@LaunchedEffect
+        }
         withContext(Dispatchers.IO) {
             keys.forEach { key ->
                 when {
@@ -122,41 +124,24 @@ internal fun DownloadsTab(
     }
 
     fun toggle(key: String) {
-        val next = if (key in selected) selected - key else selected + key
-        onSelectedChange(next)
+        onSelectedChange(if (key in selected) selected - key else selected + key)
     }
 
     if (loaded && rows.isEmpty() && files.isEmpty() && !editMode) {
-        EmptyState(
-            navStart = navStart,
-            navBottom = navBottom,
-            manualUrl = manualUrl,
-            onManualUrlChange = { manualUrl = it },
-            onAddManual = {
-                val url = manualUrl.trim()
-                if (url.isNotEmpty()) {
-                    val item = com.github.avbox.osc.player.download.DownloadItem(
-                        id = com.github.avbox.osc.player.download.DownloadTasks.idOf(url, "manual", 0),
-                        vodId = url,
-                        vodName = "手动添加",
-                        flag = "manual",
-                        episodeIndex = 0,
-                        episodeName = url.takeLast(24),
-                        playUrl = url,
-                        headers = null,
-                        poster = null,
-                        createdAt = System.currentTimeMillis(),
-                    )
-                    DownloadRepository.enqueue(context, item) { ok, err ->
-                        if (ok) {
-                            manualUrl = ""
-                        } else {
-                            Toast.makeText(context, err ?: "入队失败", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            },
-        )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 24.dp + navStart, end = 24.dp, bottom = navBottom),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = "还没有下载任务\n把视频放进 Download/AVBox/ 也会出现在这里",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
         return
     }
 
@@ -183,8 +168,11 @@ internal fun DownloadsTab(
                             toggle(key)
                         } else {
                             scope.launch {
-                                if (row.isPaused) DownloadRepository.resume(context, row.item.id)
-                                else if (row.isDownloading || row.isQueued) DownloadRepository.pause(context, row.item.id)
+                                if (row.isPaused) {
+                                    DownloadRepository.resume(context, row.item.id)
+                                } else if (row.isDownloading || row.isQueued) {
+                                    DownloadRepository.pause(context, row.item.id)
+                                }
                             }
                         }
                     },
@@ -224,50 +212,6 @@ internal fun DownloadsTab(
                 },
                 onLongClick = { pendingDeleteFile = file },
             )
-        }
-
-        if (!editMode) {
-            item(key = "manual-entry") {
-                OutlinedTextField(
-                    value = manualUrl,
-                    onValueChange = { manualUrl = it },
-                    label = { Text("粘贴 m3u8 地址直接下载") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp),
-                )
-            }
-            item(key = "manual-button") {
-                TextButton(
-                    enabled = manualUrl.trim().startsWith("http"),
-                    onClick = {
-                        val url = manualUrl.trim()
-                        if (url.isEmpty()) return@TextButton
-                        val item = com.github.avbox.osc.player.download.DownloadItem(
-                            id = com.github.avbox.osc.player.download.DownloadTasks.idOf(url, "manual", 0),
-                            vodId = url,
-                            vodName = "手动添加",
-                            flag = "manual",
-                            episodeIndex = 0,
-                            episodeName = url.takeLast(24),
-                            playUrl = url,
-                            headers = null,
-                            poster = null,
-                            createdAt = System.currentTimeMillis(),
-                        )
-                        DownloadRepository.enqueue(context, item) { ok, err ->
-                            if (ok) {
-                                manualUrl = ""
-                            } else {
-                                Toast.makeText(context, err ?: "入队失败", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
-                ) {
-                    Text("开始下载")
-                }
-            }
         }
     }
 
@@ -333,7 +277,9 @@ private fun SelectDot(checked: Boolean) {
         modifier = Modifier
             .size(20.dp)
             .clip(CircleShape)
-            .background(if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh)
+            .background(
+                if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+            )
             .border(
                 width = 1.dp,
                 color = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
@@ -343,45 +289,6 @@ private fun SelectDot(checked: Boolean) {
     ) {
         if (checked) {
             Text("✓", color = MaterialTheme.colorScheme.onPrimary, fontSize = 12.sp)
-        }
-    }
-}
-
-@Composable
-private fun EmptyState(
-    navStart: Dp,
-    navBottom: Dp,
-    manualUrl: String,
-    onManualUrlChange: (String) -> Unit,
-    onAddManual: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(start = 24.dp + navStart, end = 24.dp, bottom = navBottom),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            text = "还没有下载任务\n把视频放进 Download/AVBox/ 也会出现在这里",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        OutlinedTextField(
-            value = manualUrl,
-            onValueChange = onManualUrlChange,
-            label = { Text("粘贴 m3u8 地址直接下载") },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 20.dp),
-        )
-        TextButton(
-            enabled = manualUrl.trim().startsWith("http"),
-            onClick = onAddManual,
-        ) {
-            Text("开始下载")
         }
     }
 }
