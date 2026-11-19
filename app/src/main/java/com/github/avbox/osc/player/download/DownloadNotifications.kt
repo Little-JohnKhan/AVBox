@@ -144,21 +144,29 @@ class DownloadForegroundService : Service() {
             return
         }
         val downloaded = active.sumOf { if (it.bytes > 0L) it.bytes else 0L }
-        val total = active.sumOf { if (it.totalBytes > 0L) it.totalBytes else 0L }
-        val percent = if (total > 0L) {
-            ((downloaded.toDouble() / total.toDouble()) * 100).toInt()
+        // 总字节数在下载前未知，进度只能用「已完成分片 / 总片数」算，不能用字节
+        val doneSegments = active.sumOf { if (it.doneSegments > 0) it.doneSegments else 0 }
+        val totalSegments = active.sumOf { if (it.totalSegments > 0) it.totalSegments else 0 }
+        val percent = if (totalSegments > 0) {
+            (doneSegments * 100 / totalSegments).coerceIn(0, 100)
         } else {
-            active.sumOf { it.percent.toInt() } / active.size
+            0
         }
         val first = active.firstOrNull()
-        val text = if (active.size == 1 && first != null) {
-            first.vodName + " · " + first.episodeName + " · " +
-                first.doneSegments + "/" + first.totalSegments + " 片 · " + formatBytes(first.bytes)
-        } else if (total > 0L) {
-            formatBytes(downloaded) + " / " + formatBytes(total) + " · 共 " + active.size + " 个任务"
+        val parts = ArrayList<String>()
+        if (active.size == 1 && first != null) {
+            parts.add(first.vodName)
+            parts.add(first.episodeName)
+            if (first.totalSegments > 0) {
+                parts.add(first.doneSegments.toString() + "/" + first.totalSegments + " 片")
+            }
+            if (first.bytes > 0L) parts.add(formatBytes(first.bytes))
         } else {
-            "共 " + active.size + " 个任务 · " + percent + "%"
+            parts.add("共 " + active.size + " 个任务")
+            parts.add(percent.toString() + "%")
+            if (downloaded > 0L) parts.add(formatBytes(downloaded))
         }
+        val text = parts.filter { it.isNotBlank() }.joinToString(" · ")
         DownloadNotifications.notify(this, "离线下载", text, percent)
     }
 

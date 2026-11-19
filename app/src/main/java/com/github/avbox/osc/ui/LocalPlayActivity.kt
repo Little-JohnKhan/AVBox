@@ -6,24 +6,29 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.ui.platform.ComposeView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
+import androidx.media3.exoplayer.SeekParameters
+import com.github.avbox.osc.R
 import com.github.avbox.osc.ui.base.BaseActivity
 import com.github.avbox.osc.util.AppLog
 
 import java.io.File
 
 /**
- * 极简本地播放页：给一个本地文件路径就播，不联网、不查详情、不依赖任何播放会话。
+ * 本地播放页：给一个本地文件路径就播，不联网、不查详情、不依赖任何播放会话。
  *
  * 存在的理由：详情页那套播放器要先拉剧集详情才能起播，断网时连详情页都进不去，
- * 下载好的文件根本没法播。这里绕开整条网络链路，只保留「文件 → 播放器」。
+ * 下载好的文件根本没法播。这里绕开整条网络链路，只保留「文件 → 播放器」，
+ * 界面与手势由 [LocalPlayerScreen] 提供。
  *
- * 初始化写在 [init]（BaseActivity.onCreate 里回调）之后，不覆盖 onCreate。
+ * 初始化写在 [init]（BaseActivity.onCreate 里回调）里。
  */
 class LocalPlayActivity : BaseActivity() {
 
@@ -46,18 +51,11 @@ class LocalPlayActivity : BaseActivity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val view = PlayerView(this)
-        view.setShowNextButton(false)
-        view.setShowPreviousButton(false)
-        view.setShowFastForwardButton(false)
-        view.setShowRewindButton(false)
-        // BaseActivity 已经把 compose_view 设为内容视图，这里直接换成播放器视图
-        setContentView(view)
-
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
-        val exo = ExoPlayer.Builder(this, renderers).build()
+        val exo = ExoPlayer.Builder(this, renderers)
+            .setSeekParameters(SeekParameters.CLOSEST_SYNC)
+            .build()
         player = exo
-        view.player = exo
         exo.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -67,6 +65,17 @@ class LocalPlayActivity : BaseActivity() {
         })
         exo.prepare()
         exo.playWhenReady = true
+
+        val host = findViewById<ComposeView>(R.id.compose_view) ?: return
+        host.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                LocalPlayerScreen(
+                    player = exo,
+                    title = file.name,
+                    onExit = { finish() },
+                )
+            }
+        }
         AppLog.i("echo-local-play: " + path + " size=" + file.length())
     }
 
