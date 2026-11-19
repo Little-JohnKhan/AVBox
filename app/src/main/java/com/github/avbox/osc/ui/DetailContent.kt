@@ -186,7 +186,7 @@ internal fun DetailContent(
         onDismiss = { downloadSheetOpen = false },
         onConfirm = { indexes ->
             downloadSheetOpen = false
-            DownloadBatch.start(activity, info, indexes)
+            DownloadBatch.start(activity, info, indexes, vm.firstsourceKey)
         },
     )
 }

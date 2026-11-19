@@ -25,7 +25,7 @@ import org.json.JSONObject
 object EpisodeResolver {
 
     private const val TAG = "EpisodeResolver"
-    private const val TIMEOUT_MS = 30_000L
+    private const val TIMEOUT_MS = 20_000L
 
     sealed interface Result {
         data class Ok(val url: String, val headers: Map<String, String>?) : Result
@@ -38,22 +38,34 @@ object EpisodeResolver {
 
     suspend fun resolve(sourceKey: String?, flag: String?, seriesUrl: String?): Result {
         if (seriesUrl.isNullOrEmpty()) return Result.Failed("没有剧集地址")
+        // 先确认这个源在当前配置里真的存在：不存在时 PlayLoader 会直接返回 null，
+        // 那种情况只能干等超时，不如提前给出明确原因
+        val bean = com.github.avbox.osc.api.ApiConfig.get().getSource(sourceKey)
+        if (bean == null) return Result.Failed("源未找到（" + (sourceKey ?: "空") + "）")
         return withContext(Dispatchers.Main) {
             val vm = SourceViewModel()
             var collector: Job? = null
             try {
+                val requested = java.util.concurrent.atomic.AtomicBoolean(false)
                 val info = withTimeoutOrNull(TIMEOUT_MS) {
                     val signal = CompletableDeferred<JSONObject?>()
                     collector = launch {
                         vm.playResult.flow.collect { value ->
-                            if (value != null && !signal.isCompleted) signal.complete(value)
+                            if (signal.isCompleted) return@collect
+                            // 非空＝真实结果；getPlay 之后来的空值＝明确失败（源侧返回 null）
+                            if (value != null) {
+                                signal.complete(value)
+                            } else if (requested.get()) {
+                                signal.complete(null)
+                            }
                         }
                     }
                     vm.getPlay(sourceKey, flag, null, seriesUrl, null)
+                    requested.set(true)
                     signal.await()
                 }
                 if (info == null) {
-                    Result.Failed("解析超时")
+                    Result.Failed("源返回空结果（该集可能已下线或无可用线路）")
                 } else {
                     val parsed = parse(info)
                     AppLog.i(

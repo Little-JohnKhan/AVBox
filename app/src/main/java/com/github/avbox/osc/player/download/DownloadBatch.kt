@@ -100,7 +100,7 @@ object DownloadBatch {
 
     // ---------- 启动 ----------
 
-    fun start(context: Context, vod: VodInfo, indexes: List<Int>) {
+    fun start(context: Context, vod: VodInfo, indexes: List<Int>, sourceKey: String?) {
         val app = context.applicationContext
         val flag = vod.playFlag
         val series = vod.seriesMap?.get(flag).orEmpty()
@@ -120,7 +120,7 @@ object DownloadBatch {
             id = "batch-" + System.currentTimeMillis(),
             vodId = vod.id ?: "",
             vodName = vod.name ?: "未命名",
-            sourceKey = vod.sourceKey,
+            sourceKey = sourceKey ?: vod.sourceKey,
             flag = flag,
             items = items,
         )
@@ -194,11 +194,15 @@ object DownloadBatch {
                 val latest = get(batchId) ?: batch
                 finish(latest)
                 withContext(Dispatchers.Main) {
+                    val head = latest.failures.firstOrNull()?.let { " · " + it.name + "：" + it.reason }
+                        ?: latest.sniff.firstOrNull()?.let { " · 需网页嗅探，请在该集播放页下载" }
+                        ?: ""
                     Toast.makeText(
                         context,
                         "批量下载结束：成功 " + latest.done.size +
                             " · 失败 " + latest.failures.size +
-                            (if (latest.sniff.isNotEmpty()) " · 需手动 " + latest.sniff.size else ""),
+                            (if (latest.sniff.isNotEmpty()) " · 需手动 " + latest.sniff.size else "") +
+                            head,
                         Toast.LENGTH_LONG,
                     ).show()
                 }
