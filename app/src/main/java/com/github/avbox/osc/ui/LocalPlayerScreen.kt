@@ -89,6 +89,11 @@ internal fun LocalPlayerScreen(
         host.onTitleChanged(videos.getOrNull(currentIndex)?.name ?: "本地视频")
     }
 
+    // 底栏「选集」按钮走 PlayerActions.onEpisodeClicked，这里把请求接回来
+    LaunchedEffect(host) {
+        host.onEpisodesRequested = { showEpisodes = true }
+    }
+
     // 右侧面板滑入/滑出动画
     val panelAnim by animateFloatAsState(
         targetValue = if (showEpisodes) 1f else 0f,
@@ -214,7 +219,11 @@ internal fun LocalPlayerScreen(
             HintText(state.seekHintText, Modifier.align(Alignment.Center))
         }
         if (state.slideHintVisible) {
-            HintText(state.slideHintText, Modifier.align(Alignment.Center))
+            SlideHint(
+                brightness = state.slideHintBrightness,
+                text = state.slideHintText,
+                modifier = Modifier.align(Alignment.Center),
+            )
         }
         if (state.speedBoostVisible) {
             HintText(fmtSpeed(state.speedBoostValue) + " 倍速", Modifier.align(Alignment.Center))
@@ -308,6 +317,35 @@ private fun IconAction(
             contentDescription = null,
             modifier = Modifier.size(iconSize),
             alpha = if (enabled) 1f else 0.35f,
+        )
+    }
+}
+
+/** 亮度/音量提示：图标 + 数值，样式照抄 PlayerLayers.PlayerSlideHint */
+@Composable
+private fun SlideHint(brightness: Boolean, text: String, modifier: Modifier) {
+    Row(
+        modifier = modifier
+            .background(Color(0x99000000), RoundedCornerShape(10.dp))
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Image(
+            painter = painterResource(
+                if (brightness) R.drawable.player_ic_brightness else R.drawable.player_ic_volume,
+            ),
+            contentDescription = null,
+            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+            modifier = Modifier.size(24.dp),
+        )
+        androidx.compose.foundation.layout.Spacer(
+            modifier = Modifier.size(width = 10.dp, height = 1.dp),
+        )
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium,
         )
     }
 }

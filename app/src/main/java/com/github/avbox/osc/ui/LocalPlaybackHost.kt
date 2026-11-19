@@ -160,8 +160,8 @@ class LocalPlaybackHost(
     /** 手势开始时的环境快照：方向判定需要这些字段 */
     fun buildSession(width: Int, height: Int, downY: Float): VideoGestureSession {
         // 新一轮手势：重置亮度/音量基准，以及横向拖动的起点（漏了这个，滑动会跳回旧位置）
-        startBrightness = Float.NaN
-        startVolume = Int.MIN_VALUE
+        startBrightness = currentBrightness()
+        startVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: Int.MIN_VALUE
         seekBase = player.currentPosition.coerceAtLeast(0L)
         seekTarget = seekBase
         val screenWidth = activity.resources.displayMetrics.widthPixels
@@ -180,6 +180,24 @@ class LocalPlaybackHost(
             screenWidth = screenWidth,
             edge = downY < 0f,
         )
+    }
+
+    /** 当前实际亮度：窗口设过就用窗口值，否则读系统值 */
+    private fun currentBrightness(): Float {
+        val fromWindow = try {
+            activity.window.attributes.screenBrightness
+        } catch (th: Throwable) {
+            -1f
+        }
+        if (fromWindow >= 0f) return fromWindow.coerceIn(0.01f, 1f)
+        return try {
+            Settings.System.getInt(
+                activity.contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+            ) / 255f
+        } catch (th: Throwable) {
+            0.5f
+        }.coerceIn(0.01f, 1f)
     }
 
     private fun touchControls(visible: Boolean = true) {
@@ -387,20 +405,8 @@ class LocalPlaybackHost(
 
     override fun onBrightnessSlide(totalDeltaY: Float) {
         val height = maxOf(activity.resources.displayMetrics.heightPixels, 1)
-        if (startBrightness.isNaN()) {
-            if (systemBrightness < 0f) {
-                systemBrightness = try {
-                    Settings.System.getInt(
-                        activity.contentResolver,
-                        Settings.System.SCREEN_BRIGHTNESS,
-                    ) / 255f
-                } catch (th: Throwable) {
-                    0.5f
-                }
-            }
-            startBrightness = systemBrightness.coerceIn(0.01f, 1f)
-        }
-        // 滑满屏高 ≈ 变化 80%，不会一滑到底
+        if (startBrightness.isNaN()) startBrightness = currentBrightness()
+        // 以按下那一刻的亮度为基准，滑满屏高 ≈ 变化 80%
         val target = (startBrightness - (totalDeltaY / height) * 0.8f).coerceIn(0.01f, 1f)
         try {
             val lp: WindowManager.LayoutParams = activity.window.attributes
