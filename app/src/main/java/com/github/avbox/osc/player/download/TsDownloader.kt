@@ -185,8 +185,17 @@ object TsDownloader {
     /** 下载中的临时文件：Download/AVBox/<名字>.ts.part */
     fun partFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts.part")
 
-    /** 成品：Download/AVBox/<名字>.ts，外部播放器可直接打开 */
-    fun publicFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts")
+    /** 成品（转换前）：Download/AVBox/<名字>.ts */
+    fun tsFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts")
+
+    /** 成品：优先返回转换后的 mp4，没有则回落到 .ts，外部播放器可直接打开 */
+    fun publicFileOf(task: TsTask): File {
+        val ts = tsFileOf(task)
+        if (ts.exists()) return ts
+        val mp4 = File(publicDir(), safeName(task) + ".mp4")
+        if (mp4.exists()) return mp4
+        return ts
+    }
 
     fun publicDir(): File {
         val dir = File(
@@ -373,6 +382,12 @@ object TsDownloader {
             TAG + " done id=" + id + " size=" + target.length() +
                 " segments=" + segments.size + " file=" + target.absolutePath,
         )
+        // 顺手排一次 MP4 封装（后台串行；失败保留 .ts 不影响播放）
+        try {
+            Mp4Converter.enqueue(ctx, target.absolutePath)
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " enqueue convert failed: " + th.message)
+        }
     }
 
     // ---------- 清单 ----------

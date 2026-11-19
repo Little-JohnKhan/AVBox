@@ -7,7 +7,6 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,7 +20,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
@@ -45,11 +43,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.github.avbox.osc.player.download.DownloadRepository
 import com.github.avbox.osc.player.download.DownloadRow
 import com.github.avbox.osc.player.download.LocalLibrary
 import com.github.avbox.osc.player.download.LocalVideo
+import com.github.avbox.osc.player.download.Mp4Converter
 import com.github.avbox.osc.ui.LocalPlayActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -363,28 +361,6 @@ private fun openAllFilesSettings(context: Context) {
     Toast.makeText(context, "请到系统设置 → 应用 → AVBox → 权限里开启「所有文件访问权限」", Toast.LENGTH_LONG).show()
 }
 
-@Composable
-private fun SelectDot(checked: Boolean) {
-    Box(
-        modifier = Modifier
-            .size(20.dp)
-            .clip(CircleShape)
-            .background(
-                if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
-            )
-            .border(
-                width = 1.dp,
-                color = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                shape = CircleShape,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (checked) {
-            Text("✓", color = MaterialTheme.colorScheme.onPrimary, fontSize = 12.sp)
-        }
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DownloadRowCard(
@@ -407,7 +383,7 @@ private fun DownloadRowCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (editMode) {
-                SelectDot(checked)
+                SelectCircle(selected = checked)
             }
             Column(
                 modifier = Modifier
@@ -470,8 +446,9 @@ private fun LocalFileCard(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (editMode) {
-            SelectDot(checked)
+            SelectCircle(selected = checked)
         }
+        val conv = Mp4Converter.stateOf(file.path)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -485,11 +462,28 @@ private fun LocalFileCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = formatBytes(file.size) + " · " + formatTime(file.modifiedAt),
+                text = when {
+                    conv == null -> formatBytes(file.size) + " · " + formatTime(file.modifiedAt)
+                    conv.failed -> formatBytes(file.size) + " · MP4 封装失败，保留 ts 直接播"
+                    conv.percent >= 100 -> formatBytes(file.size) + " · MP4 已就绪"
+                    else -> "MP4 封装中 " + conv.percent + "% · " + formatBytes(file.size)
+                },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (conv?.failed == true) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 modifier = Modifier.padding(top = 3.dp),
             )
+            if (conv != null && !conv.failed && conv.percent < 100) {
+                LinearProgressIndicator(
+                    progress = { conv.percent.coerceIn(0, 100) / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                )
+            }
         }
     }
 }

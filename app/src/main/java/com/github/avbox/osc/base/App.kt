@@ -78,6 +78,12 @@ class App : Application() {
             com.github.avbox.osc.player.download.DownloadLibrary.load(this)
         }
         bootMark("downloadLibrary")
+        // 存量 .ts 补做 MP4 封装（后台串行，慢慢转）
+        try {
+            com.github.avbox.osc.player.download.Mp4Converter.enqueueAll(this)
+        } catch (th: Throwable) {
+            com.github.avbox.osc.util.AppLog.e("boot convert failed: " + th.message)
+        }
         Thread({
             FileUtils.ensureNoMediaMarker()
             Probe.trace("boot:cleanPlayerCache") { FileUtils.cleanPlayerCache() }
