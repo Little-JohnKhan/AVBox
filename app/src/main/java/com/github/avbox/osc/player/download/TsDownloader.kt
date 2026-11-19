@@ -2,6 +2,7 @@ package com.github.avbox.osc.player.download
 
 import android.content.Context
 import android.os.Environment
+import android.os.SystemClock
 import androidx.media3.exoplayer.offline.Download
 import com.github.avbox.osc.player.engine.PurifyProxy
 import com.github.avbox.osc.util.AppLog
@@ -11,6 +12,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -18,12 +20,17 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -130,8 +137,11 @@ object TsDownloader {
 
     private const val TAG = "TsDownloader"
 
-    /** 同时下载的分片数。源站多为单连接限速，并发才能把总带宽吃满 */
-    private const val CONCURRENCY = 4
+    /**
+     * 同时下载的分片数。源站多为单连接限速，并发才能把总带宽吃满。
+     * 8 是实测比较稳的值：再往上单连接收益递减，也更容易被源站限流。
+     */
+    private const val CONCURRENCY = 8
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
@@ -141,6 +151,7 @@ object TsDownloader {
         Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val mem = ConcurrentHashMap<String, TsTask>()
     private val paused = Collections.synchronizedSet(HashSet<String>())
+    private val persistAt = ConcurrentHashMap<String, Long>()
 
     @Volatile
     private var loaded = false
@@ -151,6 +162,14 @@ object TsDownloader {
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            // 默认 maxRequestsPerHost = 5，会把 8 路并发卡回 5 路
+            .dispatcher(
+                Dispatcher().apply {
+                    maxRequests = 64
+                    maxRequestsPerHost = 16
+                },
+            )
+            .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
             .build()
     }
 
@@ -247,7 +266,7 @@ object TsDownloader {
             createdAt = if (old != null) old.createdAt else System.currentTimeMillis(),
         )
         paused.remove(item.id)
-        save(app, task)
+        save(app, task, force = true)
         DownloadNotifications.refresh(app)
         start(app, task)
         AppLog.i(TAG + " enqueue id=" + task.id + " name=" + task.vodName + " ep=" + task.episodeName)
@@ -270,7 +289,7 @@ object TsDownloader {
         if (task.state == Download.STATE_COMPLETED) return
         paused.remove(id)
         val queued = task.copy(state = Download.STATE_QUEUED, error = null)
-        save(ctx.applicationContext, queued)
+        save(ctx.applicationContext, queued, force = true)
         DownloadNotifications.refresh(ctx.applicationContext)
         start(ctx.applicationContext, queued)
     }
@@ -328,7 +347,7 @@ object TsDownloader {
                 throw th
             } catch (th: Throwable) {
                 AppLog.e(TAG, "failed id=" + task.id, th)
-                update(ctx, task.id) { t ->
+                update(ctx, task.id, force = true) { t ->
                     t.copy(state = Download.STATE_FAILED, error = th.message ?: "下载失败")
                 }
             } finally {
@@ -360,14 +379,14 @@ object TsDownloader {
         val cur = mem[id] ?: return
         if (cur.state == Download.STATE_COMPLETED) return
         val queued = cur.copy(state = Download.STATE_QUEUED, error = null)
-        save(ctx.applicationContext, queued)
+        save(ctx.applicationContext, queued, force = true)
         DownloadNotifications.refresh(ctx.applicationContext)
         start(ctx.applicationContext, queued)
     }
 
     private suspend fun run(ctx: Context, task: TsTask) {
         val id = task.id
-        update(ctx, id) { it.copy(state = Download.STATE_DOWNLOADING, error = null) }
+        update(ctx, id, force = true) { it.copy(state = Download.STATE_DOWNLOADING, error = null) }
 
         val segments = fetchSegments(task)
         if (segments.isEmpty()) throw IOException("清单里没有分片")
@@ -383,41 +402,63 @@ object TsDownloader {
         var startIndex = 0
         if (prev != null && prev.totalSegments == segments.size &&
             prev.doneSegments > 0 && prev.doneSegments < segments.size &&
-            part.exists() && part.length() == prev.bytes
+            prev.bytes > 0L && part.exists() && part.length() >= prev.bytes
         ) {
-            startIndex = prev.doneSegments
-            AppLog.i(TAG + " resume " + startIndex + "/" + segments.size)
+            // 落盘节流后，文件可能比记录多写了几片：截回记录位置再续，保证分片边界对齐
+            if (part.length() > prev.bytes && !truncateTo(part, prev.bytes)) {
+                part.delete()
+                AppLog.e(TAG + " truncate failed, restart from 0")
+            } else {
+                startIndex = prev.doneSegments
+                AppLog.i(TAG + " resume " + startIndex + "/" + segments.size + " bytes=" + prev.bytes)
+            }
         } else if (part.exists()) {
             part.delete()
         }
         var written = if (part.exists()) part.length() else 0L
-        update(ctx, id) { it.copy(totalSegments = segments.size, doneSegments = startIndex, bytes = written) }
+        update(ctx, id, force = true) {
+            it.copy(totalSegments = segments.size, doneSegments = startIndex, bytes = written)
+        }
 
         FileOutputStream(part, startIndex > 0).use { os ->
-            var index = startIndex
-            while (index < segments.size) {
-                if (paused.contains(id)) {
-                    os.flush()
-                    update(ctx, id) { it.copy(state = Download.STATE_STOPPED) }
-                    AppLog.i(TAG + " paused at " + index + "/" + segments.size)
-                    return
+            coroutineScope {
+                // 滑动窗口：始终让 CONCURRENCY 个请求在飞，同时预取一批排队，
+                // 某一片慢了只堵住自己，不再拖整批
+                val permits = Semaphore(CONCURRENCY)
+                val inFlight = ArrayList<Deferred<ByteArray>>()
+                var next = startIndex
+                var done = startIndex
+
+                fun launchOne() {
+                    if (next >= segments.size) return
+                    val i = next++
+                    inFlight.add(
+                        async(Dispatchers.IO) {
+                            permits.withPermit { fetchSegment(segments[i], task.headers) }
+                        },
+                    )
                 }
-                // 一批并发抓下来，再按顺序落盘：顺序不变，尾部只剩当前批不满的窗口
-                val end = minOf(index + CONCURRENCY, segments.size)
-                val batch = coroutineScope {
-                    (index until end).map { i ->
-                        async(Dispatchers.IO) { fetchSegment(segments[i], task.headers) }
+
+                // 预取窗口比并发数略大：一片写完马上能补位，避免收尾时并发掉到 1
+                repeat(minOf(CONCURRENCY + 4, segments.size - startIndex)) { launchOne() }
+
+                while (inFlight.isNotEmpty()) {
+                    if (paused.contains(id)) {
+                        os.flush()
+                        update(ctx, id, force = true) { it.copy(state = Download.STATE_STOPPED) }
+                        AppLog.i(TAG + " paused at " + done + "/" + segments.size)
+                        return
                     }
-                }
-                for ((offset, deferred) in batch.withIndex()) {
-                    val bytes = deferred.await()
+                    val bytes = inFlight.removeAt(0).await()
                     os.write(bytes)
                     os.flush()
                     written += bytes.size
-                    val done = index + offset + 1
-                    update(ctx, id) { it.copy(doneSegments = done, bytes = written, totalBytes = written) }
+                    done++
+                    update(ctx, id) {
+                        it.copy(doneSegments = done, bytes = written, totalBytes = written)
+                    }
+                    launchOne()
                 }
-                index = end
             }
         }
 
@@ -428,7 +469,7 @@ object TsDownloader {
             part.delete()
         }
         DownloadLibrary.markDone(task.playUrl, target.absolutePath)
-        update(ctx, id) { t ->
+        update(ctx, id, force = true) { t ->
             t.copy(
                 state = Download.STATE_COMPLETED,
                 bytes = target.length(),
@@ -569,18 +610,39 @@ object TsDownloader {
 
     // ---------- 内部工具 ----------
 
+    /** 把文件截到指定长度，用于续传前校正「记录位置」与「实际长度」的偏差 */
+    private fun truncateTo(file: File, length: Long): Boolean {
+        return try {
+            RandomAccessFile(file, "rw").use { it.setLength(length) }
+            true
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " truncate failed: " + th.message)
+            false
+        }
+    }
+
     private fun safeName(task: TsTask): String {
         val raw = (task.vodName + "_" + task.episodeName).ifBlank { task.id }
         return raw.replace(Regex("[/\\\\:*?\"<>|]"), "_").take(80)
     }
 
-    private fun update(ctx: Context, id: String, block: (TsTask) -> TsTask) {
+    /**
+     * 内存里的状态每片都更新（UI 读的是它，进度才平滑）；
+     * 落盘（KV 里整表 JSON）按 1 秒节流，否则每片一次序列化会明显拖慢下载。
+     */
+    private fun update(ctx: Context, id: String, force: Boolean = false, block: (TsTask) -> TsTask) {
         val cur = mem[id] ?: return
-        save(ctx, block(cur))
+        save(ctx, block(cur), force)
     }
 
-    private fun save(ctx: Context, task: TsTask) {
+    private fun save(ctx: Context, task: TsTask, force: Boolean = false) {
         mem[task.id] = task
+        val now = SystemClock.elapsedRealtime()
+        if (!force) {
+            val last = persistAt[task.id] ?: 0L
+            if (now - last < 1000L) return
+        }
+        persistAt[task.id] = now
         TsTaskStore.put(task)
     }
 }
