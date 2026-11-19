@@ -27,10 +27,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -40,11 +42,18 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.github.avbox.osc.R
 import com.github.avbox.osc.bean.VodInfo
 import com.github.avbox.osc.data.VodCollect
+import com.github.avbox.osc.player.download.DownloadRepository
+import com.github.avbox.osc.player.download.LocalLibrary
 import com.github.avbox.osc.ui.components.AppTopBarScaffold
 import com.github.avbox.osc.ui.components.CapsuleSegmentedButton
 import com.github.avbox.osc.ui.components.ProvideTmdbPosterLookup
 import com.github.avbox.osc.ui.components.SegmentOption
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import android.widget.Toast
 
 private enum class RecordsMode {
     History,
@@ -69,6 +78,8 @@ fun RecordsPage(
 ) {
     val historyVm: HistoryViewModel = viewModel()
     val collectVm: CollectViewModel = viewModel()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val navStart = contentPadding.calculateStartPadding(LocalLayoutDirection.current)
     val navBottom = contentPadding.calculateBottomPadding()
@@ -86,8 +97,9 @@ fun RecordsPage(
     // 下载 tab 的编辑态：选中项用 "task:<id>" / "file:<path>" 作键
     var downloadEdit by rememberSaveable { mutableStateOf(false) }
     var downloadSelected by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var downloadDeleteTick by remember { mutableStateOf(0) }
-    var downloadClearTick by remember { mutableStateOf(0) }
+    var downloadRefresh by remember { mutableStateOf(0) }
+    // 乐观初值：避免进入下载页时铅笔先消失再出现；真实状态由列表轮询回写
+    var downloadHasContent by remember { mutableStateOf(true) }
 
     val historyListState = rememberLazyGridState()
     val collectListState = rememberLazyGridState()
@@ -102,7 +114,7 @@ fun RecordsPage(
     val canEdit = when (mode) {
         RecordsMode.History -> !historyIncognito && historyItems.isNotEmpty()
         RecordsMode.Collect -> collectItems.isNotEmpty()
-        RecordsMode.Download -> true
+        RecordsMode.Download -> downloadHasContent
     }
     val selectedCount = when (mode) {
         RecordsMode.History -> historySelected.size
@@ -122,6 +134,11 @@ fun RecordsPage(
     LaunchedEffect(mode) {
         exitEdit()
         dialog = null
+    }
+
+    // 下载目录被清空后自动退出编辑态（和历史/收藏页一致）
+    LaunchedEffect(downloadHasContent) {
+        if (!downloadHasContent) downloadEdit = false
     }
 
     LaunchedEffect(historyItems) {
@@ -301,16 +318,8 @@ fun RecordsPage(
                         editMode = downloadEdit,
                         selected = downloadSelected,
                         onSelectedChange = { downloadSelected = it },
-                        deleteTick = downloadDeleteTick,
-                        clearTick = downloadClearTick,
-                        onDeleteDone = {
-                            downloadSelected = emptySet()
-                            downloadEdit = false
-                        },
-                        onClearDone = {
-                            downloadSelected = emptySet()
-                            downloadEdit = false
-                        },
+                        refreshKey = downloadRefresh,
+                        onContentChange = { downloadHasContent = it },
                     )
                 }
             }
@@ -338,8 +347,33 @@ fun RecordsPage(
             title = "清空下载",
             text = "将删除 Download/AVBox 下的全部文件和未完成的下载任务，删除后不可恢复。",
             onConfirm = {
-                downloadClearTick++
                 dialog = null
+                downloadEdit = false
+                downloadSelected = emptySet()
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        DownloadRepository.list(context).forEach { row ->
+                            try {
+                                DownloadRepository.remove(context, row.item.id)
+                            } catch (ignored: Throwable) {
+                            }
+                        }
+                    } catch (ignored: Throwable) {
+                    }
+                    var count = 0
+                    for (video in LocalLibrary.scan()) {
+                        val ok = try {
+                            video.file.delete()
+                        } catch (ignored: Throwable) {
+                            false
+                        }
+                        if (ok) count++
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "已清空 " + count + " 个文件", Toast.LENGTH_SHORT).show()
+                        downloadRefresh++
+                    }
+                }
             },
             onDismiss = { dialog = null },
         )
@@ -348,8 +382,29 @@ fun RecordsPage(
             title = stringResource(R.string.common_delete_selected),
             text = "已选 " + downloadSelected.size + " 项，删除后不可恢复。",
             onConfirm = {
-                downloadDeleteTick++
+                val keys = downloadSelected.toList()
                 dialog = null
+                downloadEdit = false
+                downloadSelected = emptySet()
+                scope.launch(Dispatchers.IO) {
+                    for (key in keys) {
+                        when {
+                            key.startsWith("task:") -> try {
+                                DownloadRepository.remove(context, key.removePrefix("task:"))
+                            } catch (ignored: Throwable) {
+                            }
+
+                            key.startsWith("file:") -> try {
+                                File(key.removePrefix("file:")).delete()
+                            } catch (ignored: Throwable) {
+                            }
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "已删除 " + keys.size + " 项", Toast.LENGTH_SHORT).show()
+                        downloadRefresh++
+                    }
+                }
             },
             onDismiss = { dialog = null },
         )

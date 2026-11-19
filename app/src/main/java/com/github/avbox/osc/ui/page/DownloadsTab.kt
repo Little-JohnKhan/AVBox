@@ -54,7 +54,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -72,10 +71,8 @@ internal fun DownloadsTab(
     editMode: Boolean = false,
     selected: Set<String> = emptySet(),
     onSelectedChange: (Set<String>) -> Unit = {},
-    deleteTick: Int = 0,
-    onDeleteDone: () -> Unit = {},
-    clearTick: Int = 0,
-    onClearDone: () -> Unit = {},
+    refreshKey: Int = 0,
+    onContentChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -83,8 +80,6 @@ internal fun DownloadsTab(
     var files by remember { mutableStateOf<List<LocalVideo>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var hasAllFiles by remember { mutableStateOf(true) }
-    var handledTick by remember { mutableStateOf(0) }
-    var handledClearTick by remember { mutableStateOf(0) }
     var pendingDeleteTask by remember { mutableStateOf<DownloadRow?>(null) }
     var pendingDeleteFile by remember { mutableStateOf<LocalVideo?>(null) }
 
@@ -99,65 +94,16 @@ internal fun DownloadsTab(
                 files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
             }
             loaded = true
+            onContentChange(rows.isNotEmpty() || files.isNotEmpty())
             tick++
             delay(1000)
         }
     }
 
-    // 顶栏「删除选中」确认后触发；同一 tick 只处理一次
-    LaunchedEffect(deleteTick) {
-        if (deleteTick <= 0 || deleteTick <= handledTick) return@LaunchedEffect
-        handledTick = deleteTick
-        val keys = selected.toList()
-        if (keys.isEmpty()) {
-            onDeleteDone()
-            return@LaunchedEffect
-        }
-        withContext(Dispatchers.IO) {
-            keys.forEach { key ->
-                when {
-                    key.startsWith("task:") -> DownloadRepository.remove(context, key.removePrefix("task:"))
-                    key.startsWith("file:") -> {
-                        try {
-                            File(key.removePrefix("file:")).delete()
-                        } catch (ignored: Throwable) {
-                        }
-                    }
-                }
-            }
-        }
-        files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
-        rows = DownloadRepository.list(context).filterNot { it.isDone }
-        Toast.makeText(context, "已删除 " + keys.size + " 项", Toast.LENGTH_SHORT).show()
-        onDeleteDone()
-    }
-
-    // 顶栏「清空下载」确认后触发；删除全部任务与目录文件
-    LaunchedEffect(clearTick) {
-        if (clearTick <= 0 || clearTick <= handledClearTick) return@LaunchedEffect
-        handledClearTick = clearTick
-        val removed = withContext(Dispatchers.IO) {
-            DownloadRepository.list(context).forEach { row ->
-                try {
-                    DownloadRepository.remove(context, row.item.id)
-                } catch (ignored: Throwable) {
-                }
-            }
-            var count = 0
-            LocalLibrary.scan().forEach { video ->
-                val ok = try {
-                    video.file.delete()
-                } catch (ignored: Throwable) {
-                    false
-                }
-                if (ok) count++
-            }
-            count
-        }
+    // 删除/清空在确认弹窗里直接做完，这里只做一次刷新（幂等，重建时重复执行无害）
+    LaunchedEffect(refreshKey) {
         rows = DownloadRepository.list(context).filterNot { it.isDone }
         files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
-        Toast.makeText(context, "已清空 " + removed + " 个文件", Toast.LENGTH_SHORT).show()
-        onClearDone()
     }
 
     fun toggle(key: String) {
