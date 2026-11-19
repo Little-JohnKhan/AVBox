@@ -62,6 +62,10 @@ object DownloadBatch {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
 
+    /** 内存里的最新批次：UI 每秒读它，避免反复反序列化 KV */
+    @Volatile
+    private var memBatch: Batch? = null
+
     // ---------- 持久化 ----------
 
     @Synchronized
@@ -75,6 +79,7 @@ object DownloadBatch {
 
     @Synchronized
     private fun save(batch: Batch) {
+        memBatch = batch
         try {
             val list = all().filterNot { it.id == batch.id }.toMutableList()
             list.add(0, batch)
@@ -87,8 +92,11 @@ object DownloadBatch {
     @Synchronized
     fun get(id: String): Batch? = all().firstOrNull { it.id == id }
 
-    /** 正在进行的批次（同一时间只允许一个） */
-    fun current(): Batch? = all().firstOrNull { it.state != STATE_DONE }
+    /** 最新的批次（含已完成），下载页用它展示进度和失败原因 */
+    fun current(): Batch? = memBatch ?: all().firstOrNull()
+
+    /** 仍在运行的批次（App 启动续跑用） */
+    fun activeBatch(): Batch? = all().firstOrNull { it.state != STATE_DONE }
 
     // ---------- 启动 ----------
 
@@ -117,7 +125,10 @@ object DownloadBatch {
             items = items,
         )
         save(batch)
-        AppLog.i(TAG + " start " + batch.vodName + " count=" + items.size + " flag=" + flag)
+        AppLog.i(
+            TAG + " start " + batch.vodName + " count=" + items.size +
+                " flag=" + flag + " saved=" + (get(batch.id) != null),
+        )
 
         TsDownloader.setTaskLimit(1)
         Mp4Converter.setBatchMode(true)
@@ -130,6 +141,7 @@ object DownloadBatch {
     fun clearFinished() {
         try {
             val list = all().filterNot { it.state == STATE_DONE }
+            memBatch = null
             KV.put(KEY, gson.toJson(list, storeType))
         } catch (th: Throwable) {
             AppLog.e(TAG + " clear failed: " + th.message)
@@ -138,7 +150,7 @@ object DownloadBatch {
 
     fun resumeRunning(context: Context) {
         val app = context.applicationContext
-        val batch = current() ?: return
+        val batch = activeBatch() ?: return
         if (batch.state != STATE_RUNNING) return
         if (job?.isActive == true) return
         TsDownloader.setTaskLimit(1)
@@ -148,13 +160,13 @@ object DownloadBatch {
 
     fun pauseAll(context: Context) {
         TsDownloader.setPausedAll(context, true)
-        val batch = current() ?: return
+        val batch = activeBatch() ?: return
         save(batch.copy(state = STATE_PAUSED))
     }
 
     fun resumeAll(context: Context) {
         TsDownloader.setPausedAll(context, false)
-        val batch = current() ?: return
+        val batch = activeBatch() ?: return
         if (batch.state == STATE_PAUSED) save(batch.copy(state = STATE_RUNNING))
         resumeRunning(context)
     }
@@ -169,6 +181,7 @@ object DownloadBatch {
     // ---------- 主循环 ----------
 
     private suspend fun run(context: Context, batchId: String) {
+        var consecutiveResolveFailures = 0
         while (true) {
             val batch = get(batchId) ?: return
             if (batch.state == STATE_DONE) break
@@ -202,6 +215,7 @@ object DownloadBatch {
             val resolved = EpisodeResolver.resolve(batch.sourceKey, batch.flag, item.url)
             when (resolved) {
                 is EpisodeResolver.Result.Ok -> {
+                    consecutiveResolveFailures = 0
                     val downloadItem = DownloadItem(
                         id = taskId,
                         vodId = batch.vodId,
@@ -249,6 +263,19 @@ object DownloadBatch {
                 is EpisodeResolver.Result.Failed -> {
                     AppLog.e(TAG + " resolve failed " + item.name + " : " + resolved.reason)
                     markFailed(batchId, item.index, item.name, resolved.reason)
+                    consecutiveResolveFailures++
+                    if (consecutiveResolveFailures >= 3) {
+                        val b = get(batchId)
+                        if (b != null) finish(b)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(
+                                context,
+                                "连续 3 集解析失败，已停止批量下载（" + resolved.reason + "）",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                        break
+                    }
                 }
             }
         }

@@ -334,7 +334,11 @@ private fun BatchCard(batch: DownloadBatch.Batch) {
                 DownloadBatch.STATE_PAUSED -> "已暂停 · 成功 " + batch.done.size +
                     " · 失败 " + batch.failures.size
 
-                else -> "批量下载中 · 成功 " + batch.done.size + " · 失败 " + batch.failures.size
+                else -> {
+                    val cur = batch.items.getOrNull(batch.cursor)?.name
+                    "正在处理" + (if (cur != null) "：" + cur else "") +
+                        " · 成功 " + batch.done.size + " · 失败 " + batch.failures.size
+                }
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
