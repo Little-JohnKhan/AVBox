@@ -44,7 +44,6 @@ import com.github.avbox.osc.ui.components.AppTopBarScaffold
 import com.github.avbox.osc.ui.components.CapsuleSegmentedButton
 import com.github.avbox.osc.ui.components.ProvideTmdbPosterLookup
 import com.github.avbox.osc.ui.components.SegmentOption
-import com.github.avbox.osc.ui.components.SegmentStyle
 import kotlinx.coroutines.flow.drop
 
 private enum class RecordsMode {
@@ -247,9 +246,7 @@ fun RecordsPage(
                 ),
                 selectedValue = mode,
                 onOptionSelected = { mode = it },
-                style = SegmentStyle.Track,
                 containerColor = MaterialTheme.colorScheme.surfaceBright,
-                pressMorph = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(start = 16.dp + navStart, end = 16.dp, top = topPad + 8.dp),
