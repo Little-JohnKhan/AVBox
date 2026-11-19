@@ -175,11 +175,9 @@ internal fun DownloadsTab(
                     onLongClick = { pendingDeleteTask = row },
                     onPause = { scope.launch { DownloadRepository.pause(context, row.item.id) } },
                     onResume = { scope.launch { DownloadRepository.resume(context, row.item.id) } },
+                    // 重试＝续传：不删已下载的分片，从断点接着下
                     onRetry = {
-                        scope.launch {
-                            DownloadRepository.remove(context, row.item.id)
-                            DownloadRepository.enqueue(context, row.item) { _, _ -> }
-                        }
+                        scope.launch { DownloadRepository.restart(context, row.item.id) }
                     },
                 )
             }
@@ -346,8 +344,12 @@ private fun DownloadRowCard(
                 Text(
                     text = row.item.episodeName + " · " + statusText(row),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    color = if (row.isFailed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 3.dp),
                 )
@@ -440,7 +442,7 @@ private fun statusText(row: DownloadRow): String {
             if (row.downloadedBytes > 0) " · " + formatBytes(row.downloadedBytes) else ""
         row.isQueued -> "等待中"
         row.isPaused -> "已暂停 · " + row.percent.toInt() + "%"
-        row.isFailed -> "失败"
+        row.isFailed -> "失败" + (row.error?.let { e -> " · " + e.replace('\n', ' ').take(60) } ?: "")
         else -> "已停止"
     }
 }

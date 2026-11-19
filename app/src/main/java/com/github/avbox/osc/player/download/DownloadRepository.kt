@@ -14,6 +14,7 @@ data class DownloadRow(
     val totalBytes: Long,
     val stopReason: Int,
     val failureReason: Int,
+    val error: String? = null,
 ) {
     val isDone: Boolean get() = state == Download.STATE_COMPLETED
     val isDownloading: Boolean get() = state == Download.STATE_DOWNLOADING
@@ -49,6 +50,7 @@ object DownloadRepository {
                 totalBytes = if (task.totalBytes > 0L) task.totalBytes else task.bytes,
                 stopReason = 0,
                 failureReason = 0,
+                error = task.error,
             )
         }
     }
@@ -59,6 +61,11 @@ object DownloadRepository {
 
     suspend fun resume(context: Context, id: String) {
         withContext(Dispatchers.IO) { TsDownloader.resume(context, id) }
+    }
+
+    /** 失败重试：保留已下载的 .part，从断点继续 */
+    suspend fun restart(context: Context, id: String) {
+        withContext(Dispatchers.IO) { TsDownloader.restart(context, id) }
     }
 
     suspend fun remove(context: Context, id: String) {

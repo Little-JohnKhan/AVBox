@@ -9,6 +9,7 @@ import com.github.avbox.osc.util.KV
 import com.github.avbox.osc.util.M3u8Purifier
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -134,6 +135,10 @@ object TsDownloader {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
+
+    /** 正在跑的下载协程登记表：保证同一集在任何时刻只有一个协程在写文件 */
+    private val running: MutableSet<String> =
+        Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val mem = ConcurrentHashMap<String, TsTask>()
     private val paused = Collections.synchronizedSet(HashSet<String>())
 
@@ -222,6 +227,11 @@ object TsDownloader {
     fun enqueue(ctx: Context, item: DownloadItem) {
         val app = ctx.applicationContext
         ensureLoaded()
+        // 同一集已经在下载中：忽略重复入队，免得把进度重置回 0
+        if (running.contains(item.id)) {
+            AppLog.i(TAG + " enqueue ignored (already running) id=" + item.id)
+            return
+        }
         val old = mem[item.id]
         val task = TsTask(
             id = item.id,
@@ -288,21 +298,71 @@ object TsDownloader {
     // ---------- 下载主流程 ----------
 
     private fun start(ctx: Context, task: TsTask) {
-        val running = jobs[task.id]
-        if (running != null && running.isActive) return
-        jobs[task.id] = scope.launch {
+        // 原子占位：抢到就开始；抢不到说明这一集已有协程在写文件，
+        // 稍等它退出（比如刚被取消）再补一次，避免任务卡在「等待中」
+        if (running.add(task.id)) {
+            launchWithSlot(ctx, task)
+            return
+        }
+        scope.launch {
+            repeat(50) {
+                delay(100)
+                if (running.add(task.id)) {
+                    launchWithSlot(ctx, task)
+                    return@launch
+                }
+            }
+            AppLog.e(TAG + " start timeout id=" + task.id)
+        }
+    }
+
+    private fun launchWithSlot(ctx: Context, task: TsTask) {
+        if (mem[task.id] == null) {
+            running.remove(task.id)
+            return
+        }
+        val job = scope.launch {
             try {
                 run(ctx, task)
+            } catch (th: CancellationException) {
+                throw th
             } catch (th: Throwable) {
                 AppLog.e(TAG, "failed id=" + task.id, th)
                 update(ctx, task.id) { t ->
                     t.copy(state = Download.STATE_FAILED, error = th.message ?: "下载失败")
                 }
             } finally {
-                jobs.remove(task.id)
+                running.remove(task.id)
                 DownloadNotifications.refresh(ctx)
             }
         }
+        jobs[task.id] = job
+        // 只删自己那条登记，避免把后来者（新协程）的引用误删
+        job.invokeOnCompletion {
+            jobs.remove(task.id, job)
+        }
+    }
+
+    /**
+     * 失败/手动重试：从断点续传。
+     *
+     * 先 cancel 并 join 旧协程，确认它已经松手再重启，避免两个协程同时写同一个 .part；
+     * 不删 part 文件，[run] 会按 doneSegments 接着往下写。
+     */
+    suspend fun restart(ctx: Context, id: String) {
+        ensureLoaded()
+        paused.remove(id)
+        val old = jobs.remove(id)
+        if (old != null) {
+            old.cancel()
+            old.join()
+        }
+        val cur = mem[id] ?: return
+        if (cur.state == Download.STATE_COMPLETED) return
+        val queued = cur.copy(state = Download.STATE_QUEUED, error = null)
+        save(ctx.applicationContext, queued)
+        DownloadNotifications.refresh(ctx.applicationContext)
+        start(ctx.applicationContext, queued)
     }
 
     private suspend fun run(ctx: Context, task: TsTask) {
