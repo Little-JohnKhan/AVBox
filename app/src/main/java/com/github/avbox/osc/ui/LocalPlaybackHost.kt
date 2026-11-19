@@ -159,9 +159,11 @@ class LocalPlaybackHost(
 
     /** 手势开始时的环境快照：方向判定需要这些字段 */
     fun buildSession(width: Int, height: Int, downY: Float): VideoGestureSession {
-        // 新一轮手势：重置亮度/音量基准
+        // 新一轮手势：重置亮度/音量基准，以及横向拖动的起点（漏了这个，滑动会跳回旧位置）
         startBrightness = Float.NaN
         startVolume = Int.MIN_VALUE
+        seekBase = player.currentPosition.coerceAtLeast(0L)
+        seekTarget = seekBase
         val screenWidth = activity.resources.displayMetrics.widthPixels
         return VideoGestureSession(
             inPlayback = true,
