@@ -420,6 +420,8 @@ object TsDownloader {
             it.copy(totalSegments = segments.size, doneSegments = startIndex, bytes = written)
         }
 
+        var done = startIndex
+        var pausedNow = false
         FileOutputStream(part, startIndex > 0).use { os ->
             coroutineScope {
                 // 滑动窗口：始终让 CONCURRENCY 个请求在飞，同时预取一批排队，
@@ -427,7 +429,6 @@ object TsDownloader {
                 val permits = Semaphore(CONCURRENCY)
                 val inFlight = ArrayList<Deferred<ByteArray>>()
                 var next = startIndex
-                var done = startIndex
 
                 fun launchOne() {
                     if (next >= segments.size) return
@@ -444,10 +445,8 @@ object TsDownloader {
 
                 while (inFlight.isNotEmpty()) {
                     if (paused.contains(id)) {
-                        os.flush()
-                        update(ctx, id, force = true) { it.copy(state = Download.STATE_STOPPED) }
-                        AppLog.i(TAG + " paused at " + done + "/" + segments.size)
-                        return
+                        pausedNow = true
+                        break
                     }
                     val bytes = inFlight.removeAt(0).await()
                     os.write(bytes)
@@ -459,6 +458,12 @@ object TsDownloader {
                     }
                     launchOne()
                 }
+            }
+            if (pausedNow) {
+                os.flush()
+                update(ctx, id, force = true) { it.copy(state = Download.STATE_STOPPED) }
+                AppLog.i(TAG + " paused at " + done + "/" + segments.size)
+                return
             }
         }
 
