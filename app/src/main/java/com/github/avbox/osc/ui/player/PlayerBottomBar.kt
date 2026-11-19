@@ -74,6 +74,8 @@ fun PlayerBottomBar(
     state: PlayerUiState,
     actions: PlayerActions,
     modifier: Modifier = Modifier,
+    /** 本地播放页用的精简模式：只留上一集/播放暂停/下一集/选集 */
+    compact: Boolean = false,
 ) {
     val edge = playerEdgePadding()
     val configuration = LocalConfiguration.current
@@ -163,6 +165,7 @@ fun PlayerBottomBar(
                 state = state,
                 actions = actions,
                 modifier = Modifier.padding(top = 6.dp),
+                compact = compact,
             )
         }
 
@@ -202,6 +205,7 @@ private fun PlayerActionRow(
     state: PlayerUiState,
     actions: PlayerActions,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     val actionBox = playerDim(R.dimen.vs_70)
     val actionIcon = playerDim(R.dimen.vs_50)
@@ -209,7 +213,12 @@ private fun PlayerActionRow(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PlayerTransportRow(state = state, actions = actions, modifier = Modifier.weight(1f))
+        PlayerTransportRow(
+            state = state,
+            actions = actions,
+            modifier = Modifier.weight(1f),
+            compact = compact,
+        )
         Row(
             horizontalArrangement = Arrangement.spacedBy(playerDim(R.dimen.vs_12)),
             verticalAlignment = Alignment.CenterVertically,
@@ -221,13 +230,15 @@ private fun PlayerActionRow(
                 iconSize = actionIcon,
                 onClick = actions::onEpisodeClicked,
             )
-            TransportButton(
-                iconRes = R.drawable.player_ic_params,
-                contentDescription = stringResource(R.string.player_menu_more),
-                box = actionBox,
-                iconSize = actionIcon,
-                onClick = actions::onParamsClicked,
-            )
+            if (!compact) {
+                TransportButton(
+                    iconRes = R.drawable.player_ic_params,
+                    contentDescription = stringResource(R.string.player_menu_more),
+                    box = actionBox,
+                    iconSize = actionIcon,
+                    onClick = actions::onParamsClicked,
+                )
+            }
         }
     }
 }
@@ -243,11 +254,13 @@ private fun PlayerTransportRow(
     state: PlayerUiState,
     actions: PlayerActions,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     val gap = playerDim(R.dimen.vs_12)
     val preferred = playerDim(R.dimen.vs_70)
+    val count = if (compact) 3 else TRANSPORT_COUNT
     BoxWithConstraints(modifier) {
-        val box = minOf(preferred, (maxWidth - gap * (TRANSPORT_COUNT - 1)) / TRANSPORT_COUNT)
+        val box = minOf(preferred, (maxWidth - gap * (count - 1)) / count)
             .coerceAtLeast(1.dp)
         val sideIcon = box * TRANSPORT_SIDE_RATIO
         val playing = state.playbackActive
@@ -255,13 +268,15 @@ private fun PlayerTransportRow(
             horizontalArrangement = Arrangement.spacedBy(gap),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TransportButton(
-                iconRes = R.drawable.player_ic_replay_10,
-                contentDescription = stringResource(R.string.player_seek_back),
-                box = box,
-                iconSize = sideIcon,
-                onClick = { actions.onSeekRelative(-SEEK_STEP_MS) },
-            )
+            if (!compact) {
+                TransportButton(
+                    iconRes = R.drawable.player_ic_replay_10,
+                    contentDescription = stringResource(R.string.player_seek_back),
+                    box = box,
+                    iconSize = sideIcon,
+                    onClick = { actions.onSeekRelative(-SEEK_STEP_MS) },
+                )
+            }
             TransportButton(
                 iconRes = if (playing) R.drawable.player_ic_pause else R.drawable.player_ic_play,
                 contentDescription = stringResource(if (playing) R.string.common_pause else R.string.common_play),
@@ -270,13 +285,15 @@ private fun PlayerTransportRow(
                 testTag = TRANSPORT_PLAY_PAUSE_TAG,
                 onClick = actions::onPlayPauseClicked,
             )
-            TransportButton(
-                iconRes = R.drawable.player_ic_forward_10,
-                contentDescription = stringResource(R.string.player_seek_forward),
-                box = box,
-                iconSize = sideIcon,
-                onClick = { actions.onSeekRelative(SEEK_STEP_MS) },
-            )
+            if (!compact) {
+                TransportButton(
+                    iconRes = R.drawable.player_ic_forward_10,
+                    contentDescription = stringResource(R.string.player_seek_forward),
+                    box = box,
+                    iconSize = sideIcon,
+                    onClick = { actions.onSeekRelative(SEEK_STEP_MS) },
+                )
+            }
             TransportButton(
                 iconRes = R.drawable.player_ic_prev,
                 contentDescription = stringResource(R.string.player_prev_episode),

@@ -2,6 +2,10 @@ package com.github.avbox.osc.ui
 
 import android.os.Handler
 import android.os.Looper
+import androidx.annotation.DrawableRes
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,14 +17,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -33,22 +36,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import com.github.avbox.osc.R
 import com.github.avbox.osc.player.download.LocalVideo
+import com.github.avbox.osc.player.state.PlayerUiState
+import com.github.avbox.osc.ui.player.PlayerBottomBar
 import com.github.avbox.osc.ui.player.videoGestureLayer
 import kotlinx.coroutines.delay
 
 /**
  * 本地播放界面。
  *
- * 手势层直接用项目的 [videoGestureLayer] / VideoGestureHandler（左右进度、左侧亮度、
- * 右侧音量、双击播放暂停、长按倍速），UI 只保留需要的几个入口：
- * 关闭、投屏、上一集、播放暂停、下一集、选集。选集是右侧半遮板的网格。
+ * 手势层复用项目的 [videoGestureLayer] / VideoGestureHandler；
+ * 顶栏底栏按原版播放器的观感组织：同样的渐变高度、同样的图标资源（player_ic_*）、
+ * 同样的电池图标与系统时间，只保留需要的入口。
  */
 @Composable
 internal fun LocalPlayerScreen(
@@ -60,14 +70,10 @@ internal fun LocalPlayerScreen(
 ) {
     val state = host.state
     var showEpisodes by remember { mutableStateOf(false) }
-    var dragging by remember { mutableStateOf(false) }
-    var dragValue by remember { mutableStateOf(0f) }
+    var panelMounted by remember { mutableStateOf(false) }
 
-    // 单击要等双击超时后才能确认，这是 videoGestureLayer 的约定
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val tapConfirm = remember {
-        Runnable { host.gestureHandler.markSingleTapConfirmed() }
-    }
+    val tapConfirm = remember { Runnable { host.gestureHandler.markSingleTapConfirmed() } }
     DisposableEffect(Unit) {
         onDispose { mainHandler.removeCallbacks(tapConfirm) }
     }
@@ -83,8 +89,20 @@ internal fun LocalPlayerScreen(
         host.onTitleChanged(videos.getOrNull(currentIndex)?.name ?: "本地视频")
     }
 
-    val durationMs = player.duration.coerceAtLeast(0L)
-    val positionMs = player.currentPosition.coerceAtLeast(0L)
+    // 右侧面板滑入/滑出动画
+    val panelAnim by animateFloatAsState(
+        targetValue = if (showEpisodes) 1f else 0f,
+        animationSpec = tween(durationMillis = 220),
+        label = "episodePanel",
+    )
+    LaunchedEffect(showEpisodes) {
+        if (showEpisodes) {
+            panelMounted = true
+        } else {
+            delay(230L)
+            panelMounted = false
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -118,106 +136,77 @@ internal fun LocalPlayerScreen(
         )
 
         if (state.controlsVisible && !showEpisodes) {
+            // ---------- 顶栏：与原版同一套渐变 + 图标 + 电池时间 ----------
             Row(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .background(
-                        Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)),
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.65f),
+                            0.45f to Color.Black.copy(alpha = 0.28f),
+                            1f to Color.Transparent,
+                        ),
                     )
-                    .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 18.dp),
+                    .padding(start = 6.dp, end = 6.dp, top = 10.dp, bottom = 26.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = { host.onBackClicked() }) {
-                    Text("✕", color = Color.White, style = MaterialTheme.typography.titleLarge)
-                }
-                Column(modifier = Modifier.weight(1f)) {
+                IconAction(R.drawable.player_ic_close) { host.onBackClicked() }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 2.dp),
+                ) {
                     Text(
                         text = state.title,
                         color = Color.White,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    val sizeLine = listOf(state.videoSize, state.videoQuality)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · ")
+                    if (sizeLine.isNotBlank()) {
+                        Text(
+                            text = sizeLine,
+                            color = Color.White.copy(alpha = 0.72f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
+                if (state.batteryPercent in 0..100) {
                     Text(
-                        text = listOf(state.videoSize, state.videoQuality)
-                            .filter { it.isNotBlank() }
-                            .joinToString(" · "),
-                        color = Color(0x99FFFFFF),
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
+                        text = state.batteryPercent.toString() + "%",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Image(
+                        painter = painterResource(batteryIcon(state)),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .padding(start = 4.dp, end = 8.dp)
+                            .size(16.dp),
                     )
                 }
-                TextButton(onClick = { host.onCastClicked() }) {
-                    Text("投屏", color = Color.White)
-                }
+                Text(
+                    text = state.sysTime,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+                IconAction(R.drawable.ic_detail_cast) { host.onCastClicked() }
             }
 
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))),
-                    )
-                    .padding(start = 12.dp, end = 12.dp, top = 20.dp, bottom = 8.dp),
-            ) {
-                Text(
-                    text = fmtTime(if (dragging) (dragValue * durationMs).toLong() else positionMs) +
-                        " / " + fmtTime(durationMs),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Slider(
-                    value = if (durationMs > 0L) {
-                        if (dragging) dragValue else (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-                    } else {
-                        0f
-                    },
-                    onValueChange = {
-                        dragging = true
-                        dragValue = it
-                    },
-                    onValueChangeFinished = {
-                        if (durationMs > 0L) {
-                            player.seekTo((dragValue.toDouble() * durationMs).toLong())
-                        }
-                        dragging = false
-                        host.keepControlsAlive()
-                    },
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(
-                        enabled = currentIndex > 0,
-                        onClick = { onSelect(currentIndex - 1) },
-                    ) {
-                        Text("上一集", color = if (currentIndex > 0) Color.White else Color(0x55FFFFFF))
-                    }
-                    TextButton(onClick = { host.onPlayPauseClicked() }) {
-                        Text(
-                            if (player.isPlaying) "暂停" else "播放",
-                            color = Color.White,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                    TextButton(
-                        enabled = currentIndex + 1 < videos.size,
-                        onClick = { onSelect(currentIndex + 1) },
-                    ) {
-                        Text(
-                            "下一集",
-                            color = if (currentIndex + 1 < videos.size) Color.White else Color(0x55FFFFFF),
-                        )
-                    }
-                    TextButton(onClick = { showEpisodes = true }) {
-                        Text("选集", color = Color.White)
-                    }
-                }
+            // ---------- 底栏：直接用项目组件（compact 模式） ----------
+            Box(modifier = Modifier.align(Alignment.BottomCenter)) {
+                PlayerBottomBar(state = state, actions = host, compact = true)
             }
         }
 
@@ -231,90 +220,95 @@ internal fun LocalPlayerScreen(
             HintText(fmtSpeed(state.speedBoostValue) + " 倍速", Modifier.align(Alignment.Center))
         }
 
-        if (showEpisodes) {
-            EpisodePanel(
-                videos = videos,
-                currentIndex = currentIndex,
-                title = state.title,
-                onDismiss = { showEpisodes = false },
-                onSelect = { i ->
-                    showEpisodes = false
-                    onSelect(i)
-                },
+        // ---------- 右侧半遮板：圆角 + 滑入动画 ----------
+        if (panelMounted) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f * panelAnim))
+                    .clickable { showEpisodes = false },
             )
-        }
-    }
-}
-
-/** 右侧半遮板：和在线播放器的选集面板同一套视觉（深底 + 两列网格 + 亮蓝选中） */
-@Composable
-private fun EpisodePanel(
-    videos: List<LocalVideo>,
-    currentIndex: Int,
-    title: String,
-    onDismiss: () -> Unit,
-    onSelect: (Int) -> Unit,
-) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0x66000000))
-                .clickable { onDismiss() },
-        )
-        Column(
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .fillMaxHeight()
-                .fillMaxWidth(0.56f)
-                .background(Color(0xF0121A2B))
-                .padding(horizontal = 14.dp, vertical = 16.dp),
-        ) {
-            Text(
-                text = title,
-                color = Color.White,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = "共 " + videos.size + " 个文件",
-                color = Color(0x99FFFFFF),
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
-            )
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.56f)
+                    .graphicsLayer { translationX = (1f - panelAnim) * size.width }
+                    .clip(RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp))
+                    .background(Color(0xF0121A2B))
+                    .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 16.dp),
             ) {
-                itemsIndexed(videos) { i, video ->
-                    val selected = i == currentIndex
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (selected) Color(0xFF2D7FF9) else Color(0x33FFFFFF))
-                            .border(
-                                width = 1.dp,
-                                color = if (selected) Color(0x00000000) else Color(0x33FFFFFF),
-                                shape = RoundedCornerShape(10.dp),
+                Text(
+                    text = state.title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "共 " + videos.size + " 个文件",
+                    color = Color(0x99FFFFFF),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
+                )
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(videos) { i, video ->
+                        val selected = i == currentIndex
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) Color(0xFF2D7FF9) else Color(0x33FFFFFF))
+                                .border(
+                                    width = 1.dp,
+                                    color = if (selected) Color(0x00000000) else Color(0x33FFFFFF),
+                                    shape = RoundedCornerShape(10.dp),
+                                )
+                                .clickable { onSelect(i) }
+                                .padding(horizontal = 10.dp, vertical = 14.dp),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            Text(
+                                text = shortName(video.name),
+                                color = if (selected) Color.White else Color(0xFFE0E0E0),
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
-                            .clickable { onSelect(i) }
-                            .padding(horizontal = 10.dp, vertical = 14.dp),
-                        contentAlignment = Alignment.CenterStart,
-                    ) {
-                        Text(
-                            text = shortName(video.name),
-                            color = if (selected) Color.White else Color(0xFFE0E0E0),
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/** 与原版 PlayerActionIconButton 同尺寸的图标按钮 */
+@Composable
+private fun IconAction(
+    @DrawableRes res: Int,
+    boxSize: Dp = 40.dp,
+    iconSize: Dp = 24.dp,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(boxSize)
+            .clip(RoundedCornerShape(50))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(res),
+            contentDescription = null,
+            modifier = Modifier.size(iconSize),
+            alpha = if (enabled) 1f else 0.35f,
+        )
     }
 }
 
@@ -323,11 +317,22 @@ private fun HintText(text: String, modifier: Modifier) {
     Text(
         text = text,
         color = Color.White,
-        style = MaterialTheme.typography.titleMedium,
+        fontSize = 15.sp,
+        fontWeight = FontWeight.Medium,
         modifier = modifier
             .background(Color(0x99000000), RoundedCornerShape(10.dp))
             .padding(horizontal = 18.dp, vertical = 10.dp),
     )
+}
+
+private fun batteryIcon(state: PlayerUiState): Int = when {
+    state.batteryCharging -> R.drawable.ic_battery_charging
+    state.batteryPercent <= 16 -> R.drawable.ic_battery_1
+    state.batteryPercent <= 33 -> R.drawable.ic_battery_2
+    state.batteryPercent <= 50 -> R.drawable.ic_battery_3
+    state.batteryPercent <= 66 -> R.drawable.ic_battery_4
+    state.batteryPercent <= 83 -> R.drawable.ic_battery_5
+    else -> R.drawable.ic_battery_6
 }
 
 private fun shortName(name: String): String {
