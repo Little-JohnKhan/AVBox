@@ -55,7 +55,14 @@ object EpisodeResolver {
                 if (info == null) {
                     Result.Failed("解析超时")
                 } else {
-                    parse(info)
+                    val parsed = parse(info)
+                    AppLog.i(
+                        TAG + " result=" + parsed.javaClass.simpleName +
+                            " parse=" + info.optString("parse", "-") +
+                            " jx=" + info.optString("jx", "-") +
+                            " url=" + info.optString("url", "").take(80),
+                    )
+                    parsed
                 }
             } catch (th: Throwable) {
                 AppLog.e(TAG + " resolve failed: " + th.message)
@@ -69,14 +76,32 @@ object EpisodeResolver {
     private fun parse(info: JSONObject): Result {
         val msg = info.optString("msg", "")
         if (msg.isNotEmpty()) return Result.Failed(msg)
+
+        val prefix = info.optString("playUrl", "")
+        val rel = info.optString("url", "")
+        val full = when {
+            rel.isEmpty() -> ""
+            rel.startsWith("http", ignoreCase = true) -> rel
+            else -> prefix + rel
+        }
+        val headers = SourceHelper.extractPlayHeaders(info)?.toMap()
+
+        // 关键：只要拼出来是媒体直链就直接用。
+        // 播放链路里 parse 的缺省值是 "1"（交给 initParse 嗅探），
+        // 但后台没有嗅探器，按它判会把所有直链源全判成「需嗅探」。
+        if (full.startsWith("http", ignoreCase = true) && looksLikeMedia(full)) {
+            return Result.Ok(full, headers)
+        }
         if (info.optString("parse", "1") == "1" || info.optString("jx", "0") == "1") {
             return Result.NeedSniff
         }
-        val prefix = info.optString("playUrl", "")
-        val rel = info.optString("url", "")
-        if (rel.isEmpty()) return Result.Failed("解析结果里没有播放地址")
-        val full = if (rel.startsWith("http", ignoreCase = true)) rel else prefix + rel
-        if (!full.startsWith("http", ignoreCase = true)) return Result.Failed("播放地址不合法")
-        return Result.Ok(full, SourceHelper.extractPlayHeaders(info)?.toMap())
+        if (full.startsWith("http", ignoreCase = true)) return Result.Ok(full, headers)
+        return Result.Failed(if (rel.isEmpty()) "解析结果里没有播放地址" else "播放地址不合法")
+    }
+
+    private fun looksLikeMedia(url: String): Boolean {
+        val path = url.lowercase().substringBefore('?')
+        return path.endsWith(".m3u8") || path.endsWith(".mp4") || path.endsWith(".ts") ||
+            path.endsWith(".mpd") || path.endsWith(".flv") || path.endsWith(".mkv")
     }
 }

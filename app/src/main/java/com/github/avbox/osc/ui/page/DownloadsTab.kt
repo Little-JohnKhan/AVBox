@@ -85,6 +85,7 @@ internal fun DownloadsTab(
     var pendingDeleteTask by remember { mutableStateOf<DownloadRow?>(null) }
     var pendingDeleteFile by remember { mutableStateOf<LocalVideo?>(null) }
     var pausedAll by remember { mutableStateOf(TsDownloader.isPausedAll()) }
+    var batch by remember { mutableStateOf<DownloadBatch.Batch?>(null) }
 
     LaunchedEffect(Unit) {
         var tick = 0
@@ -97,6 +98,7 @@ internal fun DownloadsTab(
                 files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
             }
             pausedAll = TsDownloader.isPausedAll()
+            batch = DownloadBatch.current()
             loaded = true
             onContentChange(rows.isNotEmpty() || files.isNotEmpty())
             tick++
@@ -155,6 +157,11 @@ internal fun DownloadsTab(
         ),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        val currentBatch = batch
+        if (currentBatch != null) {
+            item(key = "batch-card") { BatchCard(currentBatch) }
+        }
+
         if (rows.isNotEmpty()) {
             item(key = "task-header") { SectionTitle("下载中 · " + rows.size + " 个任务") }
             items(rows, key = { "task:" + it.item.id }) { row ->
@@ -205,6 +212,7 @@ internal fun DownloadsTab(
                                 DownloadBatch.pauseAll(context)
                             }
                             pausedAll = TsDownloader.isPausedAll()
+            batch = DownloadBatch.current()
                         }
                     },
                 ) {
@@ -274,6 +282,103 @@ internal fun DownloadsTab(
             },
             dismissButton = { TextButton(onClick = { pendingDeleteFile = null }) { Text("取消") } },
         )
+    }
+}
+
+@Composable
+private fun BatchCard(batch: DownloadBatch.Batch) {
+    val done = batch.state == DownloadBatch.STATE_DONE
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (done) {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainer
+                },
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = batch.vodName,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = batch.finished.toString() + "/" + batch.total,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+            if (done) {
+                TextButton(
+                    onClick = { DownloadBatch.clearFinished() },
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("清除", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        Text(
+            text = when (batch.state) {
+                DownloadBatch.STATE_DONE -> "已完成 · 成功 " + batch.done.size +
+                    " · 失败 " + batch.failures.size +
+                    (if (batch.sniff.isNotEmpty()) " · 需手动 " + batch.sniff.size else "")
+
+                DownloadBatch.STATE_PAUSED -> "已暂停 · 成功 " + batch.done.size +
+                    " · 失败 " + batch.failures.size
+
+                else -> "批量下载中 · 成功 " + batch.done.size + " · 失败 " + batch.failures.size
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        if (!done) {
+            LinearProgressIndicator(
+                progress = {
+                    if (batch.total == 0) 0f else batch.finished.toFloat() / batch.total.toFloat()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+            )
+        }
+
+        val issues = ArrayList<String>()
+        for (f in batch.failures) {
+            issues.add(f.name + "：" + f.reason)
+        }
+        for (index in batch.sniff) {
+            val name = batch.items.firstOrNull { it.index == index }?.name ?: ("第 " + (index + 1) + " 集")
+            issues.add(name + "：需要网页嗅探，请在该集播放页点下载")
+        }
+        if (issues.isNotEmpty()) {
+            for (line in issues.take(4)) {
+                Text(
+                    text = "· " + line,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+            if (issues.size > 4) {
+                Text(
+                    text = "· 还有 " + (issues.size - 4) + " 集没成功",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+        }
     }
 }
 

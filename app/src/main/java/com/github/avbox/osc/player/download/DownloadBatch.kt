@@ -1,6 +1,7 @@
 package com.github.avbox.osc.player.download
 
 import android.content.Context
+import android.widget.Toast
 import androidx.media3.exoplayer.offline.Download
 import com.github.avbox.osc.bean.VodInfo
 import com.github.avbox.osc.util.AppLog
@@ -13,6 +14,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 批量下载调度器。
@@ -35,6 +37,9 @@ object DownloadBatch {
     /** 一集的快照：重启进程后不依赖详情页，仍能继续解析下载 */
     data class Item(val index: Int, val name: String, val url: String)
 
+    /** 失败记录：带上原因，下载页要如实展示，不能静默 */
+    data class Failure(val index: Int, val name: String, val reason: String)
+
     data class Batch(
         val id: String,
         val vodId: String,
@@ -43,13 +48,13 @@ object DownloadBatch {
         val flag: String?,
         val items: List<Item>,
         val done: List<Int> = emptyList(),
-        val failed: List<Int> = emptyList(),
+        val failures: List<Failure> = emptyList(),
         val sniff: List<Int> = emptyList(),
         val cursor: Int = 0,
         val state: Int = STATE_RUNNING,
     ) {
         val total: Int get() = items.size
-        val finished: Int get() = done.size + failed.size + sniff.size
+        val finished: Int get() = done.size + failures.size + sniff.size
     }
 
     private val gson = Gson()
@@ -100,6 +105,7 @@ object DownloadBatch {
             }
         if (items.isEmpty()) {
             AppLog.e(TAG + " nothing to download")
+            Toast.makeText(app, "没有可下载的剧集", Toast.LENGTH_SHORT).show()
             return
         }
         val batch = Batch(
@@ -115,8 +121,19 @@ object DownloadBatch {
 
         TsDownloader.setTaskLimit(1)
         Mp4Converter.setBatchMode(true)
+        Toast.makeText(app, "已开始批量下载 " + items.size + " 集", Toast.LENGTH_SHORT).show()
         job?.cancel()
         job = scope.launch { run(app, batch.id) }
+    }
+
+    /** 清掉已完成批次卡片 */
+    fun clearFinished() {
+        try {
+            val list = all().filterNot { it.state == STATE_DONE }
+            KV.put(KEY, gson.toJson(list, storeType))
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " clear failed: " + th.message)
+        }
     }
 
     fun resumeRunning(context: Context) {
@@ -161,14 +178,24 @@ object DownloadBatch {
             }
             val item = batch.items.getOrNull(batch.cursor)
             if (item == null) {
-                finish(batch)
+                val latest = get(batchId) ?: batch
+                finish(latest)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "批量下载结束：成功 " + latest.done.size +
+                            " · 失败 " + latest.failures.size +
+                            (if (latest.sniff.isNotEmpty()) " · 需手动 " + latest.sniff.size else ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
                 break
             }
 
             val taskId = DownloadTasks.idOf(batch.vodId, batch.flag, item.index)
             val existing = TsDownloader.get(taskId)
             if (existing != null && existing.state == Download.STATE_COMPLETED) {
-                advance(batchId, item.index, landed = true)
+                markDone(batchId, item.index)
                 continue
             }
 
@@ -195,30 +222,33 @@ object DownloadBatch {
                         false
                     }
                     if (!enqueued) {
-                        advance(batchId, item.index, landed = false)
+                        markFailed(batchId, item.index, item.name, "加入下载队列失败")
                         continue
                     }
                     AppLog.i(TAG + " " + (batch.cursor + 1) + "/" + batch.total + " " + item.name)
                     when (TsDownloader.awaitOutcome(taskId)) {
-                        TsDownloader.Outcome.DONE -> advance(batchId, item.index, landed = true)
+                        TsDownloader.Outcome.DONE -> markDone(batchId, item.index)
                         TsDownloader.Outcome.STOPPED -> {
                             // 全部暂停：游标不动，等恢复后重新解析这一集（.part 会续传）
                             if (TsDownloader.isPausedAll()) continue
-                            advance(batchId, item.index, landed = false)
+                            markFailed(batchId, item.index, item.name, "被暂停，未下完")
                         }
-                        TsDownloader.Outcome.FAILED -> advance(batchId, item.index, landed = false)
-                        TsDownloader.Outcome.UNKNOWN -> advance(batchId, item.index, landed = false)
+
+                        TsDownloader.Outcome.FAILED, TsDownloader.Outcome.UNKNOWN -> {
+                            val why = TsDownloader.get(taskId)?.error ?: "下载中断"
+                            markFailed(batchId, item.index, item.name, why)
+                        }
                     }
                 }
 
                 EpisodeResolver.Result.NeedSniff -> {
                     AppLog.i(TAG + " need sniff " + item.name)
-                    advance(batchId, item.index, sniff = true)
+                    markSniff(batchId, item.index)
                 }
 
                 is EpisodeResolver.Result.Failed -> {
                     AppLog.e(TAG + " resolve failed " + item.name + " : " + resolved.reason)
-                    advance(batchId, item.index, landed = false)
+                    markFailed(batchId, item.index, item.name, resolved.reason)
                 }
             }
         }
@@ -226,24 +256,31 @@ object DownloadBatch {
         Mp4Converter.setBatchMode(false)
     }
 
-    private fun advance(
-        batchId: String,
-        index: Int,
-        landed: Boolean = false,
-        sniff: Boolean = false,
-    ) {
+    private fun markDone(batchId: String, index: Int) {
         val batch = get(batchId) ?: return
-        val done = if (landed) batch.done + index else batch.done
-        val failed = if (!landed && !sniff) batch.failed + index else batch.failed
-        val sniffed = if (sniff) batch.sniff + index else batch.sniff
-        save(batch.copy(done = done, failed = failed, sniff = sniffed, cursor = batch.cursor + 1))
+        save(batch.copy(done = batch.done + index, cursor = batch.cursor + 1))
+    }
+
+    private fun markSniff(batchId: String, index: Int) {
+        val batch = get(batchId) ?: return
+        save(batch.copy(sniff = batch.sniff + index, cursor = batch.cursor + 1))
+    }
+
+    private fun markFailed(batchId: String, index: Int, name: String, reason: String) {
+        val batch = get(batchId) ?: return
+        save(
+            batch.copy(
+                failures = batch.failures + Failure(index, name, reason),
+                cursor = batch.cursor + 1,
+            ),
+        )
     }
 
     private fun finish(batch: Batch) {
         save(batch.copy(state = STATE_DONE))
         AppLog.i(
             TAG + " finished " + batch.vodName +
-                " done=" + batch.done.size + " failed=" + batch.failed.size + " sniff=" + batch.sniff.size,
+                " done=" + batch.done.size + " failed=" + batch.failures.size + " sniff=" + batch.sniff.size,
         )
     }
 }
