@@ -229,6 +229,9 @@ class LocalPlaybackHost(
 
     override fun onTimeResetClicked() = Unit
 
+    /** 仓库版 PlayerActions 带下载入口；本地播放页不需要，空实现 */
+    override fun onDownloadClicked() = Unit
+
     override fun onEpisodeClicked() {
         onEpisodesRequested?.invoke()
     }
