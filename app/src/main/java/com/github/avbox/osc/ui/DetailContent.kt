@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.github.avbox.osc.R
 import com.github.avbox.osc.api.ApiConfig
 import com.github.avbox.osc.data.FollowDays
+import com.github.avbox.osc.player.download.DownloadBatch
 import com.github.avbox.osc.ui.components.FollowReminderSheet
 
 internal val HeroScrollFadeDistance = 300.dp
@@ -64,6 +65,7 @@ internal fun DetailContent(
     val followRecord by vm.follow.collectAsState()
     val description = remember(info.des) { removeHtmlTag(info.des) }
     var followScheduleOpen by rememberSaveable { mutableStateOf(false) }
+    var downloadSheetOpen by rememberSaveable { mutableStateOf(false) }
 
     val currentSource = ApiConfig.get().getSource(vm.firstsourceKey)
     val displaySourceName = currentSource?.name ?: vm.firstsourceKey
@@ -94,6 +96,7 @@ internal fun DetailContent(
                 onCast = { activity.openCast() },
                 onCollect = { vm.toggleCollect() },
                 onFollow = { followScheduleOpen = true },
+                onDownload = { downloadSheetOpen = true },
                 vm = vm,
                 rollPaused = heroRollPaused,
             )
@@ -176,6 +179,16 @@ internal fun DetailContent(
             onSave = { days, hour -> vm.saveFollow(days, hour) },
         )
     }
+
+    DownloadEpisodeSheet(
+        info = info,
+        show = downloadSheetOpen,
+        onDismiss = { downloadSheetOpen = false },
+        onConfirm = { indexes ->
+            downloadSheetOpen = false
+            DownloadBatch.start(activity, info, indexes)
+        },
+    )
 }
 
 @Composable

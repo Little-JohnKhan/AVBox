@@ -27,8 +27,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -57,7 +59,10 @@ import coil3.compose.AsyncImage
 import com.github.avbox.osc.R
 import com.github.avbox.osc.bean.TmdbEpisode
 import com.github.avbox.osc.bean.VodInfo
+import androidx.media3.exoplayer.offline.Download
 import com.github.avbox.osc.data.EpisodeMatcher
+import com.github.avbox.osc.player.download.DownloadTasks
+import com.github.avbox.osc.player.download.TsDownloader
 import com.github.avbox.osc.ui.components.AVBoxBottomSheet
 import com.github.avbox.osc.ui.components.LocalSheetDismiss
 import com.github.avbox.osc.ui.theme.filterChipColors
@@ -462,6 +467,172 @@ internal fun EpisodeSheet(vm: DetailViewModel, slideFromEnd: Boolean, showQualit
                         shape = RoundedCornerShape(12.dp),
                         colors = MaterialTheme.colorScheme.filterChipColors(),
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 批量下载的选集面板。
+ *
+ * 视觉与播放器的选集半遮板保持一致（同一个 AVBoxBottomSheet、同一套分组条与
+ * FilterChip 网格），差别只有点击语义：这里是多选，选中的 chip 亮起，
+ * 底部「下载 (N)」按钮在选中非空时才可用。已经下载完成的集直接置灰。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun DownloadEpisodeSheet(
+    info: VodInfo,
+    show: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (List<Int>) -> Unit,
+) {
+    if (!show) return
+    val flag = info.playFlag
+    val episodes = info.seriesMap?.get(flag).orEmpty()
+    if (episodes.isEmpty()) return
+    val vodId = info.id ?: ""
+
+    val downloaded = remember(vodId, flag, show) {
+        episodes.indices.filter { index ->
+            val id = DownloadTasks.idOf(vodId, flag, index)
+            TsDownloader.get(id)?.state == Download.STATE_COMPLETED
+        }.toSet()
+    }
+    val downloadable = episodes.indices.filterNot { it in downloaded }
+    var selected by remember(vodId, flag, show) { mutableStateOf<Set<Int>>(emptySet()) }
+
+    val groupCount = when {
+        episodes.size > 400 -> 120
+        episodes.size > 100 -> 60
+        else -> 20
+    }
+    val groups = if (episodes.size > groupCount) {
+        val result = ArrayList<String>()
+        var i = 0
+        while (i < episodes.size) {
+            val end = minOf(i + groupCount, episodes.size)
+            result.add("${i + 1} - $end")
+            i += groupCount
+        }
+        result
+    } else {
+        emptyList()
+    }
+    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    val gridScope = rememberCoroutineScope()
+    var selectedGroup by rememberSaveable { mutableStateOf(0) }
+
+    AVBoxBottomSheet(
+        onDismissRequest = onDismiss,
+        title = "选择要下载的剧集",
+        isScrollable = false,
+        slideFromEnd = false,
+        modifier = Modifier.fillMaxHeight(EpisodeSheetHeightFraction),
+    ) {
+        val dismissAnimated = LocalSheetDismiss.current
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (groups.isNotEmpty()) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(groups) { index, label ->
+                        FilterChip(
+                            selected = index == selectedGroup,
+                            onClick = {
+                                selectedGroup = index
+                                gridScope.launch { gridState.scrollToItem(index * groupCount) }
+                            },
+                            label = { Text(label) },
+                            shape = RoundedCornerShape(20.dp),
+                            colors = MaterialTheme.colorScheme.filterChipColors(),
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            val maxNameLength = episodes.maxOfOrNull { it.name?.length ?: 0 } ?: 0
+            val gridColumnCount = when {
+                maxNameLength <= 4 -> 4
+                maxNameLength <= 12 -> 2
+                else -> 1
+            }
+            androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                state = gridState,
+                columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(gridColumnCount),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                gridItemsIndexed(episodes) { index, ep ->
+                    val isDownloaded = index in downloaded
+                    val isSelected = index in selected
+                    FilterChip(
+                        selected = isSelected,
+                        enabled = !isDownloaded,
+                        onClick = {
+                            selected = if (isSelected) selected - index else selected + index
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp),
+                        label = {
+                            Text(
+                                text = (ep.name ?: ("第 " + (index + 1) + " 集")) +
+                                    if (isDownloaded) " · 已下载" else "",
+                                maxLines = 1,
+                                textAlign = TextAlign.Center,
+                                fontSize = 13.sp,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        },
+                        contentPadding = PaddingValues(horizontal = 6.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = MaterialTheme.colorScheme.filterChipColors(),
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        start = 16.dp,
+                        end = 16.dp,
+                        top = 8.dp,
+                        bottom = WindowInsets.navigationBarsIgnoringVisibility
+                            .asPaddingValues()
+                            .calculateBottomPadding() + 16.dp,
+                    ),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        selected = if (downloadable.isNotEmpty() && selected.size == downloadable.size) {
+                            emptySet()
+                        } else {
+                            downloadable.toSet()
+                        }
+                    },
+                    enabled = downloadable.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (selected.size == downloadable.size && downloadable.isNotEmpty()) "取消全选" else "全选")
+                }
+                Button(
+                    onClick = {
+                        onConfirm(selected.sorted())
+                        dismissAnimated()
+                    },
+                    enabled = selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (selected.isEmpty()) "下载" else "下载 (" + selected.size + ")")
                 }
             }
         }

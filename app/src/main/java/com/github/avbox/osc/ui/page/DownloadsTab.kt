@@ -43,11 +43,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.github.avbox.osc.player.download.DownloadBatch
 import com.github.avbox.osc.player.download.DownloadRepository
 import com.github.avbox.osc.player.download.DownloadRow
 import com.github.avbox.osc.player.download.LocalLibrary
 import com.github.avbox.osc.player.download.LocalVideo
 import com.github.avbox.osc.player.download.Mp4Converter
+import com.github.avbox.osc.player.download.TsDownloader
 import com.github.avbox.osc.ui.LocalPlayActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -82,6 +84,7 @@ internal fun DownloadsTab(
     var hasAllFiles by remember { mutableStateOf(true) }
     var pendingDeleteTask by remember { mutableStateOf<DownloadRow?>(null) }
     var pendingDeleteFile by remember { mutableStateOf<LocalVideo?>(null) }
+    var pausedAll by remember { mutableStateOf(TsDownloader.isPausedAll()) }
 
     LaunchedEffect(Unit) {
         var tick = 0
@@ -93,6 +96,7 @@ internal fun DownloadsTab(
             if (tick % 3 == 0 || justGranted) {
                 files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
             }
+            pausedAll = TsDownloader.isPausedAll()
             loaded = true
             onContentChange(rows.isNotEmpty() || files.isNotEmpty())
             tick++
@@ -184,7 +188,29 @@ internal fun DownloadsTab(
         }
 
         item(key = "file-header") {
-            SectionTitle("Download/AVBox · " + files.size + " 个文件")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionTitle(
+                    text = "Download/AVBox · " + files.size + " 个文件",
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            if (pausedAll) {
+                                DownloadBatch.resumeAll(context)
+                            } else {
+                                DownloadBatch.pauseAll(context)
+                            }
+                            pausedAll = TsDownloader.isPausedAll()
+                        }
+                    },
+                ) {
+                    Text(if (pausedAll) "全部开始" else "全部暂停")
+                }
+            }
         }
         if (!hasAllFiles) {
             item(key = "file-permission") {
@@ -252,12 +278,12 @@ internal fun DownloadsTab(
 }
 
 @Composable
-private fun SectionTitle(text: String) {
+private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+        modifier = modifier.padding(top = 6.dp, bottom = 2.dp),
     )
 }
 

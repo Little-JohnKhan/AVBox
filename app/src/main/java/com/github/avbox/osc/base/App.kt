@@ -84,6 +84,12 @@ class App : Application() {
         } catch (th: Throwable) {
             com.github.avbox.osc.util.AppLog.e("boot convert failed: " + th.message)
         }
+        // 上次没跑完的批量下载接着跑
+        try {
+            com.github.avbox.osc.player.download.DownloadBatch.resumeRunning(this)
+        } catch (th: Throwable) {
+            com.github.avbox.osc.util.AppLog.e("boot batch resume failed: " + th.message)
+        }
         Thread({
             FileUtils.ensureNoMediaMarker()
             Probe.trace("boot:cleanPlayerCache") { FileUtils.cleanPlayerCache() }

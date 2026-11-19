@@ -53,6 +53,13 @@ object Mp4Converter {
     private val pending = ArrayList<String>()
     private var busy = false
 
+    /** 批量下载期间挂起封装：只下不转，整批结束后再统一转 */
+    @Volatile
+    private var batchMode = false
+
+    @Volatile
+    private var appContext: android.content.Context? = null
+
     fun stateOf(path: String): State? = state?.takeIf { it.sourcePath == path }
 
     fun isBusy(): Boolean = state != null
@@ -60,6 +67,7 @@ object Mp4Converter {
     /** 排队转换一个 .ts；同一路径不会重复入队 */
     fun enqueue(context: Context, tsPath: String) {
         val app = context.applicationContext
+        appContext = app
         scope.launch {
             if (pending.contains(tsPath) || state?.sourcePath == tsPath) return@launch
             pending.add(tsPath)
@@ -70,6 +78,7 @@ object Mp4Converter {
     /** 把目录里所有 .ts 排进队列，并清掉上次残留的半成品 */
     fun enqueueAll(context: Context) {
         val app = context.applicationContext
+        appContext = app
         scope.launch {
             val sources = withContext(Dispatchers.IO) {
                 val dir = TsDownloader.publicDir()
@@ -94,11 +103,23 @@ object Mp4Converter {
         }
     }
 
+    /** 批量下载开关：true 时封装队列只排队不执行 */
+    fun setBatchMode(on: Boolean) {
+        if (batchMode == on) return
+        batchMode = on
+        AppLog.i(TAG + " batchMode=" + on + " pending=" + pending.size)
+        if (!on) {
+            val ctx = appContext ?: return
+            scope.launch { if (!busy) pump(ctx) }
+        }
+    }
+
     private suspend fun pump(context: Context) {
         if (busy) return
         busy = true
         try {
             while (pending.isNotEmpty()) {
+                while (batchMode) delay(2000)
                 val path = pending.removeAt(0)
                 val src = File(path)
                 if (!src.isFile || src.length() == 0L) continue

@@ -105,7 +105,7 @@ internal fun PlayerActionIcons(
             onClick = actions::onAudioTrackClicked,
         )
         PlayerActionIconButton(
-            iconRes = R.drawable.ic_arrow_down,
+            iconRes = R.drawable.ic_download,
             contentDescription = "下载本集",
             box = size,
             iconSize = iconSize,

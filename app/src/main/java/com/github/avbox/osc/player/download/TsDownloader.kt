@@ -12,6 +12,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +22,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
@@ -35,6 +37,7 @@ import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 一条自制下载任务的完整状态。
@@ -152,6 +155,20 @@ object TsDownloader {
     private val mem = ConcurrentHashMap<String, TsTask>()
     private val paused = Collections.synchronizedSet(HashSet<String>())
     private val persistAt = ConcurrentHashMap<String, Long>()
+
+    /** 因「全部暂停」而停下的任务，恢复时只拉起这些，不动用户手动暂停的 */
+    private val stoppedByGlobal = Collections.synchronizedSet(HashSet<String>())
+
+    /** 任务结束信号：批量下载等这一集的最终结果 */
+    private val doneSignals = ConcurrentHashMap<String, CompletableDeferred<Outcome>>()
+
+    @Volatile
+    private var globalPaused = false
+
+    @Volatile
+    private var taskLimit = Int.MAX_VALUE
+
+    private val activeTasks = AtomicInteger(0)
 
     @Volatile
     private var loaded = false
@@ -341,16 +358,25 @@ object TsDownloader {
             return
         }
         val job = scope.launch {
+            var acquired = false
             try {
+                // 任务级闸门：批量下载时限制同时下载的集数（分片并发不受影响）
+                while (activeTasks.get() >= taskLimit) delay(300)
+                activeTasks.incrementAndGet()
+                acquired = true
                 run(ctx, task)
+                signalDone(task.id, outcomeOf(task.id))
             } catch (th: CancellationException) {
+                signalDone(task.id, Outcome.UNKNOWN)
                 throw th
             } catch (th: Throwable) {
                 AppLog.e(TAG, "failed id=" + task.id, th)
                 update(ctx, task.id, force = true) { t ->
                     t.copy(state = Download.STATE_FAILED, error = th.message ?: "下载失败")
                 }
+                signalDone(task.id, Outcome.FAILED)
             } finally {
+                if (acquired) activeTasks.decrementAndGet()
                 running.remove(task.id)
                 DownloadNotifications.refresh(ctx)
             }
@@ -360,6 +386,63 @@ object TsDownloader {
         job.invokeOnCompletion {
             jobs.remove(task.id, job)
         }
+    }
+
+    /** 一集下载的最终结局 */
+    enum class Outcome { DONE, FAILED, STOPPED, UNKNOWN }
+
+    private fun signalDone(id: String, outcome: Outcome) {
+        doneSignals[id]?.complete(outcome)
+    }
+
+    private fun outcomeOf(id: String): Outcome = when (mem[id]?.state) {
+        Download.STATE_COMPLETED -> Outcome.DONE
+        Download.STATE_FAILED -> Outcome.FAILED
+        Download.STATE_STOPPED -> Outcome.STOPPED
+        else -> Outcome.UNKNOWN
+    }
+
+    /** 批量下载用：等这一集结束，并区分「下完了 / 失败 / 被暂停」 */
+    suspend fun awaitOutcome(id: String, timeoutMs: Long = 6 * 3600_000L): Outcome {
+        when (mem[id]?.state) {
+            Download.STATE_COMPLETED -> return Outcome.DONE
+            Download.STATE_FAILED -> return Outcome.FAILED
+            Download.STATE_STOPPED -> return Outcome.STOPPED
+            null -> return Outcome.UNKNOWN
+        }
+        val signal = doneSignals.getOrPut(id) { CompletableDeferred() }
+        return withTimeoutOrNull(timeoutMs) { signal.await() } ?: Outcome.UNKNOWN
+    }
+
+    /**
+     * 全部暂停 / 全部开始。
+     *
+     * 全部暂停：所有正在跑的协程在下一次分片检查时退出（保留 .part），
+     * 批次调度器也会停在当前集不再推进。
+     * 全部开始：只重新拉起「因全部暂停而停下」的任务，用户手动暂停的保持不变。
+     */
+    fun setPausedAll(ctx: Context, pausedAll: Boolean) {
+        globalPaused = pausedAll
+        val app = ctx.applicationContext
+        if (pausedAll) {
+            AppLog.i(TAG + " pause all")
+            return
+        }
+        AppLog.i(TAG + " resume all")
+        scope.launch {
+            val ids = stoppedByGlobal.toList()
+            stoppedByGlobal.clear()
+            for (taskId in ids) {
+                resume(app, taskId)
+            }
+        }
+    }
+
+    fun isPausedAll(): Boolean = globalPaused
+
+    /** 同时下载的任务数上限：批量下载时设为 1，避免多集并行把带宽和连接数打满 */
+    fun setTaskLimit(limit: Int) {
+        taskLimit = if (limit <= 0) Int.MAX_VALUE else limit
     }
 
     /**
@@ -444,7 +527,8 @@ object TsDownloader {
                 repeat(minOf(CONCURRENCY + 4, segments.size - startIndex)) { launchOne() }
 
                 while (inFlight.isNotEmpty()) {
-                    if (paused.contains(id)) {
+                    if (paused.contains(id) || globalPaused) {
+                        if (globalPaused && !paused.contains(id)) stoppedByGlobal.add(id)
                         pausedNow = true
                         break
                     }

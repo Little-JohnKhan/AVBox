@@ -217,6 +217,7 @@ internal fun DetailHero(
     onCast: () -> Unit,
     onCollect: () -> Unit,
     onFollow: () -> Unit,
+    onDownload: () -> Unit,
     vm: DetailViewModel,
     rollPaused: Boolean = false,
     modifier: Modifier = Modifier,
@@ -296,6 +297,7 @@ internal fun DetailHero(
                     onMusic = onMusic,
                     onCast = onCast,
                     onFollow = onFollow,
+                    onDownload = onDownload,
                     captionColor = captionColor,
                     flat = true,
                     modifier = Modifier.padding(top = HeroContentTopPadding),
@@ -386,6 +388,7 @@ internal fun DetailHero(
             onMusic = onMusic,
             onCast = onCast,
             onFollow = onFollow,
+            onDownload = onDownload,
             captionColor = captionColor,
             modifier = Modifier.padding(
                 start = HeroContentHorizontalPadding,
@@ -447,6 +450,7 @@ private fun DetailHeroInfoBlock(
     onMusic: () -> Unit,
     onCast: () -> Unit,
     onFollow: () -> Unit,
+    onDownload: () -> Unit,
     captionColor: Color,
     flat: Boolean = false,
     modifier: Modifier = Modifier,
@@ -501,6 +505,7 @@ private fun DetailHeroInfoBlock(
             onMusic = onMusic,
             onCast = onCast,
             onFollow = onFollow,
+            onDownload = onDownload,
             modifier = Modifier.padding(top = HeroButtonRowSpacing),
         )
     }
@@ -512,6 +517,7 @@ internal fun DetailActionRow(
     onMusic: () -> Unit,
     onCast: () -> Unit,
     onFollow: () -> Unit,
+    onDownload: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -536,6 +542,12 @@ internal fun DetailActionRow(
             contentDescription = stringResource(R.string.tab_following),
             selected = followed,
             onClick = onFollow,
+        )
+        HeroCircleButton(
+            iconRes = R.drawable.ic_download,
+            contentDescription = "下载",
+            selected = false,
+            onClick = onDownload,
         )
     }
 }
