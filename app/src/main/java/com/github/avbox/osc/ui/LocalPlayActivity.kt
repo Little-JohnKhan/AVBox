@@ -14,7 +14,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.SeekParameters
 import com.github.avbox.osc.R
 import com.github.avbox.osc.ui.base.BaseActivity
 import com.github.avbox.osc.util.AppLog
@@ -52,9 +51,8 @@ class LocalPlayActivity : BaseActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
-        val exo = ExoPlayer.Builder(this, renderers)
-            .setSeekParameters(SeekParameters.CLOSEST_SYNC)
-            .build()
+        // 用默认 seek 参数：CLOSEST_SYNC 会让音画对齐等待更明显
+        val exo = ExoPlayer.Builder(this, renderers).build()
         player = exo
         exo.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
         exo.addListener(object : Player.Listener {
@@ -71,7 +69,7 @@ class LocalPlayActivity : BaseActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 LocalPlayerScreen(
                     player = exo,
-                    title = file.name,
+                    initialPath = file.absolutePath,
                     onExit = { finish() },
                 )
             }
