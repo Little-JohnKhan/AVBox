@@ -135,7 +135,7 @@ class LocalPlaybackHost(
         }
     }
 
-    fun refreshSystemInfo() {
+    override fun refreshSystemInfo() {
         val now = System.currentTimeMillis()
         if (now - lastSysSecond < 1000L) return
         lastSysSecond = now
