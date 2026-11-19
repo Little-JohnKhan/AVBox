@@ -1,17 +1,23 @@
 package com.github.avbox.osc.ui.page
 
 import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
@@ -35,6 +41,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.github.avbox.osc.player.download.DownloadRepository
 import com.github.avbox.osc.player.download.DownloadRow
 import com.github.avbox.osc.player.download.LocalLibrary
@@ -45,21 +52,28 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * 记录页第三段：离线下载。
+ * 记录页第三段：离线下载（文件夹视图）。
  *
- * 这一页把 Download/AVBox 当文件夹用：
- * - 上半部分只放「还没下完」的任务（排队/下载中/暂停/失败），带进度和操作；
- * - 下半部分直接列目录里扫到的视频文件，文件名如实显示，点了就本地播放。
- *
- * 所以下载完的任务会自然「变成」文件条目，不再需要做任何 URL / 名称匹配。
+ * 编辑态（多选 / 删除选中）由记录页顶栏的两个按钮驱动：
+ * 选中项用 "task:<id>" / "file:<绝对路径>" 作键，删除时按前缀分派。
+ * 单条删除走长按确认弹窗，行内不再放删除按钮。
  */
 @Composable
-internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
+internal fun DownloadsTab(
+    navStart: Dp,
+    navBottom: Dp,
+    editMode: Boolean = false,
+    selected: Set<String> = emptySet(),
+    onSelectedChange: (Set<String>) -> Unit = {},
+    deleteTick: Int = 0,
+    onDeleteDone: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf<List<DownloadRow>>(emptyList()) }
@@ -73,7 +87,6 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
     LaunchedEffect(Unit) {
         var tick = 0
         while (true) {
-            // 已完成的下载不再当任务展示，它的产物会出现在下面的文件列表里
             rows = DownloadRepository.list(context).filterNot { it.isDone }
             if (tick % 3 == 0) {
                 files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
@@ -85,7 +98,35 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
         }
     }
 
-    if (loaded && rows.isEmpty() && files.isEmpty()) {
+    // 顶栏「删除选中」触发
+    LaunchedEffect(deleteTick) {
+        if (deleteTick <= 0) return@LaunchedEffect
+        val keys = selected.toList()
+        withContext(Dispatchers.IO) {
+            keys.forEach { key ->
+                when {
+                    key.startsWith("task:") -> DownloadRepository.remove(context, key.removePrefix("task:"))
+                    key.startsWith("file:") -> {
+                        try {
+                            File(key.removePrefix("file:")).delete()
+                        } catch (ignored: Throwable) {
+                        }
+                    }
+                }
+            }
+        }
+        files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
+        rows = DownloadRepository.list(context).filterNot { it.isDone }
+        Toast.makeText(context, "已删除 " + keys.size + " 项", Toast.LENGTH_SHORT).show()
+        onDeleteDone()
+    }
+
+    fun toggle(key: String) {
+        val next = if (key in selected) selected - key else selected + key
+        onSelectedChange(next)
+    }
+
+    if (loaded && rows.isEmpty() && files.isEmpty() && !editMode) {
         EmptyState(
             navStart = navStart,
             navBottom = navBottom,
@@ -132,8 +173,22 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
         if (rows.isNotEmpty()) {
             item(key = "task-header") { SectionTitle("下载中 · " + rows.size + " 个任务") }
             items(rows, key = { "task:" + it.item.id }) { row ->
+                val key = "task:" + row.item.id
                 DownloadRowCard(
                     row = row,
+                    editMode = editMode,
+                    checked = key in selected,
+                    onClick = {
+                        if (editMode) {
+                            toggle(key)
+                        } else {
+                            scope.launch {
+                                if (row.isPaused) DownloadRepository.resume(context, row.item.id)
+                                else if (row.isDownloading || row.isQueued) DownloadRepository.pause(context, row.item.id)
+                            }
+                        }
+                    },
+                    onLongClick = { pendingDeleteTask = row },
                     onPause = { scope.launch { DownloadRepository.pause(context, row.item.id) } },
                     onResume = { scope.launch { DownloadRepository.resume(context, row.item.id) } },
                     onRetry = {
@@ -142,7 +197,6 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
                             DownloadRepository.enqueue(context, row.item) { _, _ -> }
                         }
                     },
-                    onDelete = { pendingDeleteTask = row },
                 )
             }
         }
@@ -160,52 +214,59 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
             }
         }
         items(files, key = { "file:" + it.path }) { file ->
+            val key = "file:" + file.path
             LocalFileCard(
                 file = file,
-                onPlay = { LocalPlayActivity.start(context, file.path) },
-                onDelete = { pendingDeleteFile = file },
+                editMode = editMode,
+                checked = key in selected,
+                onClick = {
+                    if (editMode) toggle(key) else LocalPlayActivity.start(context, file.path)
+                },
+                onLongClick = { pendingDeleteFile = file },
             )
         }
 
-        item(key = "manual-entry") {
-            OutlinedTextField(
-                value = manualUrl,
-                onValueChange = { manualUrl = it },
-                label = { Text("粘贴 m3u8 地址直接下载") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 6.dp),
-            )
-        }
-        item(key = "manual-button") {
-            TextButton(
-                enabled = manualUrl.trim().startsWith("http"),
-                onClick = {
-                    val url = manualUrl.trim()
-                    if (url.isEmpty()) return@TextButton
-                    val item = com.github.avbox.osc.player.download.DownloadItem(
-                        id = com.github.avbox.osc.player.download.DownloadTasks.idOf(url, "manual", 0),
-                        vodId = url,
-                        vodName = "手动添加",
-                        flag = "manual",
-                        episodeIndex = 0,
-                        episodeName = url.takeLast(24),
-                        playUrl = url,
-                        headers = null,
-                        poster = null,
-                        createdAt = System.currentTimeMillis(),
-                    )
-                    DownloadRepository.enqueue(context, item) { ok, err ->
-                        if (ok) {
-                            manualUrl = ""
-                        } else {
-                            Toast.makeText(context, err ?: "入队失败", Toast.LENGTH_SHORT).show()
+        if (!editMode) {
+            item(key = "manual-entry") {
+                OutlinedTextField(
+                    value = manualUrl,
+                    onValueChange = { manualUrl = it },
+                    label = { Text("粘贴 m3u8 地址直接下载") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                )
+            }
+            item(key = "manual-button") {
+                TextButton(
+                    enabled = manualUrl.trim().startsWith("http"),
+                    onClick = {
+                        val url = manualUrl.trim()
+                        if (url.isEmpty()) return@TextButton
+                        val item = com.github.avbox.osc.player.download.DownloadItem(
+                            id = com.github.avbox.osc.player.download.DownloadTasks.idOf(url, "manual", 0),
+                            vodId = url,
+                            vodName = "手动添加",
+                            flag = "manual",
+                            episodeIndex = 0,
+                            episodeName = url.takeLast(24),
+                            playUrl = url,
+                            headers = null,
+                            poster = null,
+                            createdAt = System.currentTimeMillis(),
+                        )
+                        DownloadRepository.enqueue(context, item) { ok, err ->
+                            if (ok) {
+                                manualUrl = ""
+                            } else {
+                                Toast.makeText(context, err ?: "入队失败", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                    }
-                },
-            ) {
-                Text("开始下载")
+                    },
+                ) {
+                    Text("开始下载")
+                }
             }
         }
     }
@@ -244,11 +305,7 @@ internal fun DownloadsTab(navStart: Dp, navBottom: Dp) {
                     } catch (th: Throwable) {
                         false
                     }
-                    Toast.makeText(
-                        context,
-                        if (ok) "已删除" else "删除失败",
-                        Toast.LENGTH_SHORT,
-                    ).show()
+                    Toast.makeText(context, if (ok) "已删除" else "删除失败", Toast.LENGTH_SHORT).show()
                     scope.launch {
                         files = withContext(Dispatchers.IO) { LocalLibrary.scan() }
                     }
@@ -268,6 +325,26 @@ private fun SectionTitle(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
     )
+}
+
+@Composable
+private fun SelectDot(checked: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(20.dp)
+            .clip(CircleShape)
+            .background(if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh)
+            .border(
+                width = 1.dp,
+                color = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                shape = CircleShape,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (checked) {
+            Text("✓", color = MaterialTheme.colorScheme.onPrimary, fontSize = 12.sp)
+        }
+    }
 }
 
 @Composable
@@ -309,23 +386,35 @@ private fun EmptyState(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DownloadRowCard(
     row: DownloadRow,
+    editMode: Boolean,
+    checked: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onRetry: () -> Unit,
-    onDelete: () -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surfaceContainer)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
+            if (editMode) {
+                SelectDot(checked)
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = if (editMode) 12.dp else 0.dp),
+            ) {
                 Text(
                     text = row.item.vodName,
                     style = MaterialTheme.typography.titleMedium,
@@ -342,14 +431,15 @@ private fun DownloadRowCard(
                     modifier = Modifier.padding(top = 3.dp),
                 )
             }
-            if (row.isDownloading || row.isQueued) {
-                TextButton(onClick = onPause) { Text("暂停") }
-            } else if (row.isPaused) {
-                TextButton(onClick = onResume) { Text("继续") }
-            } else if (row.isFailed) {
-                TextButton(onClick = onRetry) { Text("重试") }
+            if (!editMode) {
+                if (row.isDownloading || row.isQueued) {
+                    TextButton(onClick = onPause) { Text("暂停") }
+                } else if (row.isPaused) {
+                    TextButton(onClick = onResume) { Text("继续") }
+                } else if (row.isFailed) {
+                    TextButton(onClick = onRetry) { Text("重试") }
+                }
             }
-            TextButton(onClick = onDelete) { Text("删除") }
         }
         if (row.isDownloading || row.isQueued || row.isPaused) {
             LinearProgressIndicator(
@@ -362,22 +452,32 @@ private fun DownloadRowCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LocalFileCard(
     file: LocalVideo,
-    onPlay: () -> Unit,
-    onDelete: () -> Unit,
+    editMode: Boolean,
+    checked: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .clickable { onPlay() }
-            .padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        if (editMode) {
+            SelectDot(checked)
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = if (editMode) 12.dp else 0.dp),
+        ) {
             Text(
                 text = file.name,
                 style = MaterialTheme.typography.titleSmall,
@@ -392,7 +492,6 @@ private fun LocalFileCard(
                 modifier = Modifier.padding(top = 3.dp),
             )
         }
-        TextButton(onClick = onDelete) { Text("删除") }
     }
 }
 

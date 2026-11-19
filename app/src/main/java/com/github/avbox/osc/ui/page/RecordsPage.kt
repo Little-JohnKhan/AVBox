@@ -82,22 +82,37 @@ fun RecordsPage(
     val collectEdit by collectVm.editMode.collectAsStateWithLifecycle()
     val collectSelected by collectVm.selected.collectAsStateWithLifecycle()
     var dialog by remember { mutableStateOf<RecordsDialog?>(null) }
+    // 下载 tab 的编辑态：选中项用 "task:<id>" / "file:<path>" 作键
+    var downloadEdit by rememberSaveable { mutableStateOf(false) }
+    var downloadSelected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var downloadDeleteTick by remember { mutableStateOf(0) }
 
     val historyListState = rememberLazyGridState()
     val collectListState = rememberLazyGridState()
 
     val isHistory = mode == RecordsMode.History
-    val editing = if (isHistory) historyEdit else collectEdit
-    val canEdit = if (isHistory) {
-        !historyIncognito && historyItems.isNotEmpty()
-    } else {
-        collectItems.isNotEmpty()
+    val isDownload = mode == RecordsMode.Download
+    val editing = when (mode) {
+        RecordsMode.History -> historyEdit
+        RecordsMode.Collect -> collectEdit
+        RecordsMode.Download -> downloadEdit
     }
-    val selectedCount = if (isHistory) historySelected.size else collectSelected.size
+    val canEdit = when (mode) {
+        RecordsMode.History -> !historyIncognito && historyItems.isNotEmpty()
+        RecordsMode.Collect -> collectItems.isNotEmpty()
+        RecordsMode.Download -> true
+    }
+    val selectedCount = when (mode) {
+        RecordsMode.History -> historySelected.size
+        RecordsMode.Collect -> collectSelected.size
+        RecordsMode.Download -> downloadSelected.size
+    }
 
     fun exitEdit() {
         historyVm.exitEdit()
         collectVm.exitEdit()
+        downloadEdit = false
+        downloadSelected = emptySet()
     }
 
     BackHandler(enabled = editing) { exitEdit() }
@@ -167,7 +182,9 @@ fun RecordsPage(
                             contentDescription = stringResource(R.string.common_delete_selected),
                             enabled = selectedCount > 0,
                             onClick = {
-                                dialog = if (isHistory) {
+                                if (isDownload) {
+                                    downloadDeleteTick++
+                                } else dialog = if (isHistory) {
                                     RecordsDialog.DeleteSelectedHistory
                                 } else {
                                     RecordsDialog.DeleteSelectedCollect
@@ -180,7 +197,11 @@ fun RecordsPage(
                                 iconRes = R.drawable.ic_edit,
                                 contentDescription = stringResource(R.string.common_edit),
                                 onClick = {
-                                    if (isHistory) historyVm.enterEdit() else collectVm.enterEdit()
+                                    when (mode) {
+                                            RecordsMode.History -> historyVm.enterEdit()
+                                            RecordsMode.Collect -> collectVm.enterEdit()
+                                            RecordsMode.Download -> downloadEdit = true
+                                        }
                                 },
                             )
                         }
@@ -192,7 +213,7 @@ fun RecordsPage(
                                 stringResource(R.string.collect_clear)
                             },
                             onClick = {
-                                dialog = if (isHistory) {
+                                if (!isDownload) dialog = if (isHistory) {
                                     RecordsDialog.ClearHistory
                                 } else {
                                     RecordsDialog.ClearCollect
@@ -225,7 +246,7 @@ fun RecordsPage(
                 ),
                 selectedValue = mode,
                 onOptionSelected = { mode = it },
-                style = SegmentStyle.Track,
+                style = SegmentStyle.Connected,
                 containerColor = MaterialTheme.colorScheme.surfaceContainer,
                 pressMorph = true,
                 modifier = Modifier
@@ -274,7 +295,15 @@ fun RecordsPage(
                             navBottom = navBottom,
                         )
                     }
-                    RecordsMode.Download -> DownloadsTab(navStart = navStart, navBottom = navBottom)
+                    RecordsMode.Download -> DownloadsTab(
+                        navStart = navStart,
+                        navBottom = navBottom,
+                        editMode = downloadEdit,
+                        selected = downloadSelected,
+                        onSelectedChange = { downloadSelected = it },
+                        deleteTick = downloadDeleteTick,
+                        onDeleteDone = { downloadSelected = emptySet() },
+                    )
                 }
             }
         }
