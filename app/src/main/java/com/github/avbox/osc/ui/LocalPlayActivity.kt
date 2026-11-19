@@ -8,6 +8,9 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -15,23 +18,25 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.github.avbox.osc.R
+import com.github.avbox.osc.player.download.LocalLibrary
+import com.github.avbox.osc.player.download.LocalVideo
 import com.github.avbox.osc.ui.base.BaseActivity
 import com.github.avbox.osc.util.AppLog
 
 import java.io.File
 
 /**
- * 本地播放页：给一个本地文件路径就播，不联网、不查详情、不依赖任何播放会话。
+ * 本地播放页：给一个本地文件路径就播，不联网、不查详情。
  *
- * 存在的理由：详情页那套播放器要先拉剧集详情才能起播，断网时连详情页都进不去，
- * 下载好的文件根本没法播。这里绕开整条网络链路，只保留「文件 → 播放器」，
- * 界面与手势由 [LocalPlayerScreen] 提供。
- *
- * 初始化写在 [init]（BaseActivity.onCreate 里回调）里。
+ * 界面与手势复用在线播放器那套组件（顶栏 / 底栏 / VideoGestureHandler），
+ * 状态由 [LocalPlaybackHost] 从 ExoPlayer 翻译过去。
  */
 class LocalPlayActivity : BaseActivity() {
 
     private var player: ExoPlayer? = null
+    private var host: LocalPlaybackHost? = null
+    private var videos: List<LocalVideo> = emptyList()
+    private var index by mutableStateOf(0)
 
     override fun init() {
         val path = intent.getStringExtra(EXTRA_PATH).orEmpty()
@@ -50,31 +55,68 @@ class LocalPlayActivity : BaseActivity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // 同目录文件列表：上一集/下一集/选集都基于它（自然排序由 LocalLibrary 保证）
+        videos = LocalLibrary.scan()
+        val found = videos.indexOfFirst { it.path == path }
+        index = if (found >= 0) found else 0
+
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
-        // 用默认 seek 参数：CLOSEST_SYNC 会让音画对齐等待更明显
         val exo = ExoPlayer.Builder(this, renderers).build()
         player = exo
-        exo.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 AppLog.e("LocalPlayActivity", "play failed " + error.errorCodeName, error)
                 Toast.makeText(this@LocalPlayActivity, "播放失败：" + error.errorCodeName, Toast.LENGTH_LONG).show()
             }
         })
-        exo.prepare()
-        exo.playWhenReady = true
 
-        val host = findViewById<ComposeView>(R.id.compose_view) ?: return
-        host.setContent {
+        val playbackHost = LocalPlaybackHost(this, exo, object : LocalPlaybackHost.Callbacks {
+            override fun onExit() = finish()
+
+            override fun onPrev() = switchTo(index - 1)
+
+            override fun onNext() = switchTo(index + 1)
+
+            override fun onEpisodes() = Unit
+
+            override fun onCast() {
+                Toast.makeText(this@LocalPlayActivity, "本地文件投屏下个版本接入", Toast.LENGTH_SHORT).show()
+            }
+
+            override fun onSwitch(index: Int) = switchTo(index)
+        })
+        host = playbackHost
+
+        playAt(index)
+
+        val composeHost = findViewById<ComposeView>(R.id.compose_view) ?: return
+        composeHost.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 LocalPlayerScreen(
                     player = exo,
-                    initialPath = file.absolutePath,
-                    onExit = { finish() },
+                    host = playbackHost,
+                    videos = videos,
+                    currentIndex = index,
+                    onSelect = { switchTo(it) },
                 )
             }
         }
-        AppLog.i("echo-local-play: " + path + " size=" + file.length())
+        AppLog.i("echo-local-play: " + path + " size=" + file.length() + " files=" + videos.size)
+    }
+
+    private fun switchTo(target: Int) {
+        if (target < 0 || target >= videos.size) return
+        index = target
+        playAt(target)
+    }
+
+    private fun playAt(target: Int) {
+        val video = videos.getOrNull(target) ?: return
+        val exo = player ?: return
+        exo.setMediaItem(MediaItem.fromUri(Uri.fromFile(video.file)))
+        exo.prepare()
+        exo.playWhenReady = true
+        AppLog.i("echo-local-play-switch: " + target + " " + video.name)
     }
 
     override fun onStop() {
@@ -85,6 +127,7 @@ class LocalPlayActivity : BaseActivity() {
     override fun onDestroy() {
         player?.release()
         player = null
+        host = null
         super.onDestroy()
     }
 
