@@ -592,10 +592,17 @@ object TsDownloader {
             TAG + " done id=" + id + " size=" + target.length() +
                 " segments=" + segments.size + " file=" + target.absolutePath,
         )
-        // 时间轴体检：只统计不断点、不改文件，用来确认净化删分片是否造成 PTS 跳变
+        // 时间轴处理：源站残缺分片留下 PTS 空洞，转 MP4 时会被写成「一帧显示 2 秒」
+        // （画面定格）并且音频比视频短（越播越超前）。先重写成连续时间轴再体检。
+        try {
+            val stat = TsFixer.fix(target)
+            if (stat != null) DownloadLog.write("fixer " + stat.toString() + " file=" + target.name)
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " fixer failed: " + th.message)
+        }
         try {
             val probe = TsProbe.scan(target)
-            if (probe != null) AppLog.i(TAG + " pts " + probe.toString() + " file=" + target.name)
+            if (probe != null) DownloadLog.write("pts " + probe.toString() + " file=" + target.name)
         } catch (th: Throwable) {
             AppLog.e(TAG + " pts probe failed: " + th.message)
         }
@@ -701,20 +708,40 @@ object TsDownloader {
         }
 
         var text = M3u8Purifier.stripBom(content)
+        // 净化统一走 PurifyEngine：两层判断与播放侧 StreamProxy.purifyM3u8 完全一致，
+        // 在线播放看到什么，下载下来就是什么。
+        // 例外：地址本身已经是本地净化代理（pure=1 / 127.0.0.1）时说明清单已经洗过一遍，
+        // 再洗一次会二次误删，所以跳过。
         if (PurifyProxy.enabled()) {
-            val report = M3u8Purifier.Report()
-            val purified = M3u8Purifier.purify(text, base, report)
-            if (purified != null) {
-                text = purified
-                AppLog.i(TAG + " purify " + report.toString())
+            if (isLocalPurifyUrl(task.playUrl)) {
+                DownloadLog.write("purify 跳过：清单来自本地净化代理")
             } else {
-                AppLog.i(TAG + " purify skip " + report.toString())
+                val before = countSegments(text)
+                val result = PurifyEngine.purify(text, base)
+                text = result.text
+                val after = countSegments(text)
+                DownloadLog.write("purify dropped=" + (before - after) + "/" + before + " " + result.toString())
             }
         }
         return text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
             .map { M3u8Purifier.resolve(base, it) }
+    }
+
+    /** 本地净化代理地址（清单已经被洗过一遍） */
+    private fun isLocalPurifyUrl(url: String): Boolean {
+        val u = url.lowercase()
+        return u.contains("pure=1") || u.contains("127.0.0.1") || u.contains("localhost")
+    }
+
+    private fun countSegments(text: String): Int {
+        var n = 0
+        for (line in text.split("\n")) {
+            val t = line.trim()
+            if (t.isNotEmpty() && !t.startsWith("#")) n++
+        }
+        return n
     }
 
     private fun isMaster(content: String): Boolean = content.contains("#EXT-X-STREAM-INF")
@@ -792,6 +819,14 @@ object TsDownloader {
             val first = bytes[0].toInt() and 0xFF
             if (first != 0x47) {
                 throw IOException("不是 TS 分片（首字节 0x" + Integer.toHexString(first) + "）")
+            }
+            // 源站偶尔给出残缺分片（末尾多／少几个字节）。TS 是固定 188 字节一个包，
+            // 一旦不对齐，拼进整片后后面所有包都会错位，播放器只能边找同步字边丢帧
+            // —— 表现就是「画面一卡一卡」。这里把尾巴的残字节切掉。
+            val rem = bytes.size % 188
+            if (rem != 0) {
+                DownloadLog.write("segment 残缺 " + rem + " 字节已截断 " + url.substringAfterLast('/').take(40))
+                return bytes.copyOf(bytes.size - rem)
             }
             return bytes
         }
