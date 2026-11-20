@@ -193,6 +193,11 @@ object Mp4Converter {
                 suspendCancellableCoroutine { cont ->
                     val holder = ProgressHolder()
                     var transformer: Transformer? = null
+                    // 停滞检测：后台封装如果被系统掐断，进度会停住但状态还是"正在封装"，
+                    // 光看界面分不清「转换本身卡住」和「进程被冻结」。这里超过 90 秒没动就记一笔，
+                    // 日志停在某一格不动 = 进程被冻结，日志里出现「停滞」= 转换器自己卡住。
+                    var lastPercent = -1
+                    var lastChangeAt = System.currentTimeMillis()
                     val poller = scope.launch {
                         while (cont.isActive) {
                             val t = transformer
@@ -200,6 +205,14 @@ object Mp4Converter {
                                 t.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE
                             ) {
                                 val p = holder.progress.coerceIn(0, 100)
+                                val now = System.currentTimeMillis()
+                                if (p != lastPercent) {
+                                    lastPercent = p
+                                    lastChangeAt = now
+                                } else if (now - lastChangeAt > 90_000L) {
+                                    DownloadLog.write("convert 停滞 90s @" + p + "% " + src.name)
+                                    lastChangeAt = now
+                                }
                                 state = state?.copy(percent = p)
                             }
                             delay(500)

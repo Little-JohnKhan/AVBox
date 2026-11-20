@@ -78,7 +78,16 @@ object EpisodeResolver {
         //    这种情况完全不需要过解析器，直接用最省事也最稳
         val raw = seriesUrl.substringBefore('#')
         if (raw.startsWith("http", ignoreCase = true) && looksLikeMedia(raw)) {
-            debug("  direct 直链直接用")
+            // 直链也要先问一遍 spider：源侧的广告过滤（会弹 toast 的那种）就发生在
+            // spider.playerContent 里面，播放链路正是这么拿到干净地址的。
+            // 这里若直接返回原始直链，就会绕过源过滤，下到带广告的脏清单——
+            // 结果就是「在线播放没广告、下载下来却被我们自己的规则削掉片尾」。
+            val viaSpider = resolveViaSpider(sourceKey, flag, seriesUrl)
+            if (viaSpider is Result.Ok) {
+                debug("  direct 直链，但 spider 返回了过滤后地址，优先使用")
+                return viaSpider
+            }
+            debug("  direct 直链直接用（spider 无结果，回落原始地址）")
             return Result.Ok(raw, null)
         }
 

@@ -271,7 +271,12 @@ object DownloadBatch {
                         TsDownloader.Outcome.STOPPED -> {
                             // 全部暂停：游标不动，等恢复后重新解析这一集（.part 会续传）
                             if (TsDownloader.isPausedAll()) continue
-                            markFailed(batchId, item.index, item.name, "被暂停，未下完")
+                            // 单集被暂停：整批一起暂停，**不记失败**。
+                            // 之前记成「被暂停，未下完」，用户恢复下载后这条失败记录永远不会消失，
+                            // 卡片就一直是「已完成 · 失败 1 · 第N集：被暂停，未下完」。
+                            AppLog.i(TAG + " paused by single task, suspend batch cursor=" + batch.cursor)
+                            save(get(batchId)?.copy(state = STATE_PAUSED) ?: batch.copy(state = STATE_PAUSED))
+                            return
                         }
 
                         TsDownloader.Outcome.FAILED, TsDownloader.Outcome.UNKNOWN -> {
