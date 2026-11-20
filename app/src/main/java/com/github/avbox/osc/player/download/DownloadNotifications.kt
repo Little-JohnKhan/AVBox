@@ -139,8 +139,19 @@ class DownloadForegroundService : Service() {
                 it.state == Download.STATE_QUEUED ||
                 it.state == Download.STATE_RESTARTING
         }
+        val conv = Mp4Converter.state
         if (active.isEmpty()) {
-            stopSelfSafely()
+            if (conv == null) {
+                stopSelfSafely()
+                return
+            }
+            // 没有下载任务、但在封装：界面不能停，否则进程掉进 cached 会被冻结
+            val text = if (conv.failed) {
+                "封装失败，保留 ts 直接播 · " + conv.sourceName
+            } else {
+                "正在封装 " + conv.percent + "% · " + conv.sourceName
+            }
+            DownloadNotifications.notify(this, "离线下载", text, conv.percent)
             return
         }
         val downloaded = active.sumOf { if (it.bytes > 0L) it.bytes else 0L }

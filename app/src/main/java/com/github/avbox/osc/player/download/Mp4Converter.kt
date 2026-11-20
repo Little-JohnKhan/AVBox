@@ -133,6 +133,11 @@ object Mp4Converter {
 
                 val temp = File(src.parentFile, src.nameWithoutExtension + PARTIAL_SUFFIX)
                 state = State(src.absolutePath, src.name, dst.name, 0)
+                // 拉起前台服务：没有它，进程在后台会被系统冻结，转换停在原地不动
+                try {
+                    DownloadNotifications.refresh(context)
+                } catch (ignored: Throwable) {
+                }
                 val ok = runTransform(context, src, temp)
                 val produced = ok && temp.isFile && temp.length() > 0L
 

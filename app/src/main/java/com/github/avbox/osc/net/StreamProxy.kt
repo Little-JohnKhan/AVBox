@@ -5,6 +5,7 @@ import com.github.avbox.osc.util.AppLog
 import com.github.avbox.osc.util.LocalAddress
 import com.github.avbox.osc.player.usecase.M3u8
 import com.github.avbox.osc.util.M3u8Purifier
+import com.github.avbox.osc.player.download.PurifyEngine
 import com.github.avbox.osc.util.PurifyStats
 
 import java.io.ByteArrayInputStream
@@ -185,22 +186,17 @@ object StreamProxy {
      */
     private fun purifyM3u8(content: String?, baseUrl: String, params: Map<String, String>): String {
         if (content == null) return ""
-        var text = M3u8Purifier.stripBom(content)
-        val report = M3u8Purifier.Report()
-        var purified = M3u8Purifier.purify(text, baseUrl, report)
-        if (purified == null) {
-            // 我们的启发式没识别出广告，交给原版「目录多数派 + 广告域名过滤」再判一次。
-            // 两套算法互补：我们擅长随机 hash 分片与块结构异常，原版擅长少数派 CDN。
-            val legacy = legacyPurify(text, baseUrl, report)
-            if (legacy != null) purified = legacy
-        }
-        if (purified != null) {
-            text = purified
-            AppLog.i("echo-purify-hit: " + report.toString())
+        // 净化统一交给 PurifyEngine：播放和下载必须走同一份逻辑，否则会出现
+        // 「播放时删了广告、下载下来没删」或反过来。它内部会先判断源是否已经过滤过
+        //（清单里出现空断点），源过滤过就整份放行，不和源过滤叠加。
+        val pure = PurifyEngine.purify(content, baseUrl)
+        var text = pure.text
+        if (pure.report != null) PurifyStats.record(pure.report)
+        if (pure.changed) {
+            AppLog.i("echo-purify-hit: " + pure.toString())
         } else {
-            AppLog.i("echo-purify-skip: " + report.toString())
+            AppLog.i("echo-purify-skip: " + pure.toString())
         }
-        PurifyStats.record(report)
 
         val lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
         val sb = StringBuilder()

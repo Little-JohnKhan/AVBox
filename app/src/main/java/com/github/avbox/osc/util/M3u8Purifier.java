@@ -191,16 +191,29 @@ public final class M3u8Purifier {
             kill.clear();
         }
 
-        // ---- ② 块结构异常、③ 目录多数派：已下线
-        //
-        // 这两条都是「按形态猜广告」：片数少 + 时长短就判广告，或按目录分组投票。
-        // 实测代价太大——电影片头（龙标 3 片 6 秒）、动画工作室的片头动画（2 片 4 秒，
-        // 纯黄底卡通）都符合「短块」特征，会被当广告删掉；而各家的赞助商片头又各不相同，
-        // 无法靠加规则穷举。用户明确要求：片头一律保留，宁可漏广告。
-        //
-        // 所以只保留 ①「源方规则」这一档强特征：源作者在配置里写明的广告域名/正则，
-        // 命中就删、没命中就原样放行。等价于「信任源侧过滤，我们的规则只在源给了规则时生效」。
-        if (rep.reason.isEmpty()) rep.reason = "未命中强特征（源规则），保持原样";
+        // ---- ② 块结构异常
+        kill = detectByBlocks(lines, segs, byLine);
+        if (!kill.isEmpty()) {
+            rep.reason = "块结构异常（片数/时长显著偏小）";
+            if (acceptWithFuse(lines, segs, byLine, kill, rep, MAX_DROP_RATIO)) {
+                return build(lines, segs, byLine, kill, baseUrl, nl, rep);
+            }
+            rep.reason += "，删除量过大已放行";
+            return null;
+        }
+
+        // ---- ③ 目录多数派
+        kill = detectByMajority(segs, rep);
+        if (!kill.isEmpty()) {
+            rep.reason = "目录多数派（" + String.format(Locale.US, "%.0f%%", rep.ratio * 100) + "）";
+            if (acceptWithFuse(lines, segs, byLine, kill, rep, MAX_DROP_RATIO)) {
+                return build(lines, segs, byLine, kill, baseUrl, nl, rep);
+            }
+            rep.reason += "，删除量过大已放行";
+            return null;
+        }
+
+        if (rep.reason.isEmpty()) rep.reason = "未发现可识别特征";
         return null;
     }
 

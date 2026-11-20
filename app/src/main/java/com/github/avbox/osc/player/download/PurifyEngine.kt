@@ -1,136 +1,121 @@
 package com.github.avbox.osc.player.download
 
+import com.github.avbox.osc.player.usecase.M3u8
 import com.github.avbox.osc.util.AppLog
 import com.github.avbox.osc.util.M3u8Purifier
 
 /**
- * 广告过滤入口（保守版）。
+ * 广告过滤的唯一入口。播放（StreamProxy.purifyM3u8）和下载（TsDownloader）都走这里。
  *
- * 原则：**信任源侧过滤，我们的规则只做兜底，且只认强特征**。
+ * 判定顺序：
  *
- *   ① 源方规则：源作者在配置里写明的广告域名 / 正则，命中就删；
- *   ② 少数派 CDN：分片分散在多个域名时，占比明显偏低的那几个域名整体剔除
- *      （广告基本都挂在另一个 CDN 上，正片在自己的 CDN 上）；
- *   ③ 都不命中就原样放行，一个分片都不删。
+ *   ⓪ **源侧已过滤**：清单里出现「空断点」（连续两个 #EXT-X-DISCONTINUITY 之间没有分片）。
+ *      正常切片不会产生空断点，它是源删掉中间分片、标记没删留下的伤疤。
+ *      一旦看到（≥2 处）就整份放行——**不和源过滤叠加**，这是唯一去看"源做过什么"的判据。
  *
- * 明确不做的事（实测会误伤的形态猜测）：
- *   - 按「块片数 / 时长偏小」判广告：电影龙标（3 片 6 秒）、动画工作室片头（2 片 4 秒）
- *     都符合短块特征，会被当成广告删掉；
- *   - 按「EXTINF 小数精度 / 帧率」分组：片头常单独转码，帧率与正片不同，同样会被删；
- *   - 按「目录多数派」投票：同域同目录的插播区分不出来，反而容易把片头孤立掉。
+ *   ① M3u8Purifier：源方规则 → 块结构异常 → 目录多数派。
+ *      擅长「随机 hash 分片」「广告单独转码成一小段」这类源。
  *
- * 各家片头、赞助商 logo 各不相同，靠规则穷举不现实，所以这些一律保留。
- * 代价是漏掉一部分插播广告，用户已确认接受。
+ *   ② ①判不出来时交给原版 M3u8.purify：少数派 CDN + EXTINF 精度/帧率分组 + DISCONTINUITY 分块 + CUE/DATERANGE 标记。
+ *      擅长「广告段是另一套时长体系」的源（如 dytt-hot：正片 4.171s 非整秒，广告段时长体系不同）。
+ *
+ * 两层都不命中才算这个源干净。注意：形态判定会误伤片头（龙标 3 片 6 秒、工作室 logo 2 片 4 秒），
+ * 用户已确认接受——各家片头各不相同，无法穷举规则，宁可少删。
  */
 object PurifyEngine {
 
-    data class Result(val text: String, val changed: Boolean, val dropped: Int, val reason: String) {
+    data class Result(
+        val text: String,
+        val changed: Boolean,
+        val dropped: Int,
+        val reason: String,
+        val report: M3u8Purifier.Report? = null,
+    ) {
         override fun toString(): String = "changed=" + changed + " dropped=" + dropped + " reason=" + reason
     }
 
-    /** 少数派域名占比低于这个值时判为广告 CDN */
-    private const val MINORITY_RATIO = 0.15
-    /** 少数派域名至少要这么多片才敢删，避免把单片的特殊地址当广告 */
-    private const val MINORITY_MIN_SEGMENTS = 2
-    /** 删除量上限（按分片数），超过就整份放行 */
-    private const val MAX_DROP_RATIO = 0.20
+    /** M3u8.currentAdCount 是静态字段，并发处理多份清单会串，这里串行化 */
+    private val legacyLock = Any()
 
     fun purify(content: String, baseUrl: String): Result {
         val text = M3u8Purifier.stripBom(content)
-        val nl = if (text.contains("\r\n")) "\r\n" else "\n"
 
-        // ① 源方规则（M3u8Purifier 现在只剩这一档，形态判定已下线）
+        // ⓪ 源已过滤 → 不参与，一个片都不删
+        val emptyBreaks = countEmptyDiscontinuities(text)
+        if (emptyBreaks >= 2) {
+            val report = M3u8Purifier.Report()
+            report.total = countSegments(text)
+            report.reason = "源已过滤（空断点 " + emptyBreaks + " 处）"
+            return Result(text, false, 0, report.reason, report)
+        }
+
+        // ① M3u8Purifier（源规则 + 块结构异常 + 目录多数派）
         val report = M3u8Purifier.Report()
-        val byRule = try {
+        val heuristic = try {
             M3u8Purifier.purify(text, baseUrl, report)
         } catch (th: Throwable) {
-            AppLog.e("PurifyEngine 源规则失败: " + th.message)
+            AppLog.e("PurifyEngine 启发式失败: " + th.message)
             null
         }
-        if (byRule != null) {
-            return Result(byRule, true, report.dropped, report.reason.ifEmpty { "源方规则" })
+        if (heuristic != null) {
+            return Result(heuristic, true, report.dropped, report.reason.ifEmpty { "块结构异常" }, report)
         }
 
-        // ② 少数派 CDN（强特征：不同域名的分片基本只能是广告）
-        val byHost = removeMinorityHost(text, baseUrl, nl)
-        if (byHost != null) return byHost
-
-        // ③ 原样放行
-        return Result(text, false, 0, report.reason.ifEmpty { "未命中强特征，保持原样" })
-    }
-
-    // ---------- 少数派 CDN ----------
-
-    private fun removeMinorityHost(text: String, baseUrl: String, nl: String): Result? {
-        val lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
-        val segHosts = HashMap<Int, String>()
-        val counter = LinkedHashMap<String, Int>()
-        for (i in lines.indices) {
-            val line = lines[i].trim()
-            if (line.isEmpty() || line.startsWith("#")) continue
-            val host = hostOf(resolve(baseUrl, line)) ?: continue
-            segHosts[i] = host
-            counter[host] = (counter[host] ?: 0) + 1
-        }
-        if (counter.size <= 1) return null
-        val total = segHosts.size
-        if (total < 10) return null
-
-        val minority = HashSet<String>()
-        for ((host, count) in counter) {
-            if (count.toDouble() / total < MINORITY_RATIO && count >= MINORITY_MIN_SEGMENTS) {
-                minority.add(host)
-            }
-        }
-        if (minority.isEmpty()) return null
-
-        var dropCount = 0
-        for (host in minority) dropCount += counter[host] ?: 0
-        if (dropCount.toDouble() / total > MAX_DROP_RATIO) {
-            AppLog.i("PurifyEngine 少数派删除量过大（" + dropCount + "/" + total + "），放行")
-            return null
-        }
-
-        val out = StringBuilder()
-        for (i in lines.indices) {
-            val host = segHosts[i]
-            if (host != null && minority.contains(host)) {
-                // 连同它上面紧邻的 #EXTINF 一起丢掉
-                val sb = out.length
-                if (sb > 0) {
-                    val lastNl = out.lastIndexOf("\n")
-                    if (lastNl >= 0) {
-                        val lastLine = out.substring(lastNl + 1).trim()
-                        if (lastLine.startsWith("#EXTINF")) {
-                            out.setLength(lastNl + 1)
-                        }
-                    }
+        // ② 原版兜底（少数派 CDN + 精度/帧率分组 + 分块 + CUE 标记）
+        synchronized(legacyLock) {
+            try {
+                val legacy = M3u8.purify(dirOf(baseUrl), text)
+                val ads = M3u8.currentAdCount
+                if (legacy != null && ads > 0) {
+                    report.dropped = ads
+                    if (report.total <= 0) report.total = countSegments(text)
+                    report.reason = "原版判定"
+                    return Result(legacy, true, ads, report.reason, report)
                 }
-                continue
+            } catch (th: Throwable) {
+                AppLog.e("PurifyEngine 原版失败: " + th.message)
             }
-            out.append(lines[i]).append(nl)
         }
-        return Result(out.toString(), true, dropCount, "少数派 CDN:" + minority.joinToString(","))
+
+        return Result(text, false, 0, report.reason.ifEmpty { "未检出广告，保持原样" }, report)
     }
 
-    private fun resolve(base: String, uri: String): String {
-        if (uri.startsWith("http://") || uri.startsWith("https://")) return uri
-        val dir = base.substringBefore('?').substringBeforeLast('/')
-        return if (uri.startsWith("/")) {
-            val host = base.substringBefore("://").let { if (it.isEmpty()) "https" else it } +
-                "://" + base.substringAfter("://").substringBefore('/')
-            host + uri
-        } else {
-            dir + "/" + uri
+    // ---------- 源过滤痕迹 ----------
+
+    /**
+     * 统计「空断点」：连续两个 #EXT-X-DISCONTINUITY 之间没有任何分片行。
+     * 实测：《罗小黑战记》wsym3u8 源 50 处（源删过广告），dytt-hot 源 0 处（源没删）。
+     */
+    private fun countEmptyDiscontinuities(text: String): Int {
+        var empty = 0
+        var prevWasBreak = false
+        for (raw in text.split("\n")) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#EXT-X-DISCONTINUITY") && !line.startsWith("#EXT-X-DISCONTINUITY-SEQUENCE")) {
+                if (prevWasBreak) empty++
+                prevWasBreak = true
+            } else if (!line.startsWith("#")) {
+                prevWasBreak = false
+            }
         }
+        return empty
     }
 
-    private fun hostOf(url: String): String? {
-        val idx = url.indexOf("://")
-        if (idx < 0) return null
-        val rest = url.substring(idx + 3)
-        val end = rest.indexOf('/')
-        val host = if (end > 0) rest.substring(0, end) else rest
-        return host.ifEmpty { null }
+    private fun countSegments(text: String): Int {
+        var n = 0
+        for (raw in text.split("\n")) {
+            val line = raw.trim()
+            if (line.isNotEmpty() && !line.startsWith("#")) n++
+        }
+        return n
+    }
+
+    /** 清单所在目录（末尾带斜杠），原版 purify 靠它解析相对路径 */
+    private fun dirOf(url: String): String {
+        val q = url.indexOf('?')
+        val u = if (q >= 0) url.substring(0, q) else url
+        val i = u.lastIndexOf('/')
+        return if (i > 8) u.substring(0, i + 1) else u
     }
 }
