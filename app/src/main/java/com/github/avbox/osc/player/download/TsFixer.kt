@@ -80,8 +80,8 @@ object TsFixer {
                 if (d > 0) diffs.add(d)
             }
             val mode = diffs.groupingBy { it }.eachCount().maxByOrNull { it.value }?.value ?: 0
-            if (diffs.isEmpty() || mode * 100 / diffs.size < 70) {
-                AppLog.i(TAG + " 放弃：帧时长不稳定（众数占比 " + (if (diffs.isEmpty()) 0 else mode * 100 / diffs.size) + "%）")
+            if (diffs.isEmpty() || mode * 100 / diffs.size < 50) {
+                AppLog.i(TAG + " 放弃：帧时长分布过于离散（众数占比 " + (if (diffs.isEmpty()) 0 else mode * 100 / diffs.size) + "%）")
                 return null
             }
 
@@ -100,13 +100,18 @@ object TsFixer {
                 return Stat(video.size, audio.size, 0, frameTicks / 90.0, gaps.size, maxGap, false, "时间轴连续")
             }
 
-            val vBase = video[0].dts
+            // 保留原帧间隔，只把空洞压成一帧。
+            // 绝不能按「中位帧时长」匀速重排：片头/龙标段常是另一套帧率（如 24fps/15fps），
+            // 匀速化会把那段画面拉慢，声音则按原速走，结果就是「龙标特别慢、声音跑到前面」。
             val vPts = LongArray(video.size)
             val vDts = LongArray(video.size)
-            for (i in video.indices) {
-                val nd = vBase + i.toLong() * frameTicks
-                vDts[i] = nd
-                vPts[i] = nd + (video[i].pts - video[i].dts)
+            vDts[0] = video[0].dts
+            vPts[0] = video[0].pts
+            for (i in 1 until video.size) {
+                val orig = video[i].dts - video[i - 1].dts
+                val step = if (orig <= 0L || orig > frameTicks * 3 / 2) frameTicks else orig
+                vDts[i] = vDts[i - 1] + step
+                vPts[i] = vDts[i] + (video[i].pts - video[i].dts)
             }
 
             val aPts = LongArray(audio.size)
@@ -276,7 +281,8 @@ object TsFixer {
         if (audio.size != audioCount) return "音频 PES 数不符 " + audio.size + "≠" + audioCount
         for (i in 1 until video.size) {
             val d = video[i].dts - video[i - 1].dts
-            if (d != frameTicks) return "视频 DTS 间隔异常 " + d + "≠" + frameTicks
+            // 允许不同段落有各自的帧率，但不能为 0/负、也不能还留着大空洞
+            if (d <= 0L || d > frameTicks * 2) return "视频 DTS 间隔异常 " + d + " (基准 " + frameTicks + ")"
         }
         for (j in 1 until audio.size) {
             if (audio[j].pts <= audio[j - 1].pts) {

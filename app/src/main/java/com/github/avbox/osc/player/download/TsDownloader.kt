@@ -338,7 +338,15 @@ object TsDownloader {
             } catch (ignored: Throwable) {
             }
             try {
-                publicFileOf(task).delete()
+                tsFileOf(task).delete()
+            } catch (ignored: Throwable) {
+            }
+            try {
+                File(publicDir(), safeName(task) + ".mp4").delete()
+            } catch (ignored: Throwable) {
+            }
+            try {
+                File(publicDir(), safeName(task) + ".ts.fixtmp").delete()
             } catch (ignored: Throwable) {
             }
             DownloadLibrary.markRemoved(task.playUrl)
@@ -502,7 +510,11 @@ object TsDownloader {
             throw IOException("下载目录不可写，请在系统设置里允许 AVBox 访问「所有文件」")
         }
         val part = partFileOf(task)
-        val target = publicFileOf(task)
+        // 注意：这里必须用 tsFileOf，不能用 publicFileOf。
+        // publicFileOf 的语义是「优先 .ts、没有则回落到 .mp4」，给播放/打开用；
+        // 一旦拿它当写盘目标，重复下载同一集时（ts 已被封装删掉）会把 target 解析成
+        // 已封装好的 .mp4，收尾的 delete + rename 就把成品删了、再把 ts 内容改名成 .mp4。
+        val target = tsFileOf(task)
         val prev = mem[id]
         var startIndex = 0
         if (prev != null && prev.totalSegments == segments.size &&
