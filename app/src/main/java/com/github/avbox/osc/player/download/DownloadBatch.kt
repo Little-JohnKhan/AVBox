@@ -216,7 +216,12 @@ object DownloadBatch {
                 continue
             }
 
-            val resolved = EpisodeResolver.resolve(batch.sourceKey, batch.flag, item.url)
+            val resolved = EpisodeResolver.resolve(
+                sourceKey = batch.sourceKey,
+                flag = batch.flag,
+                seriesUrl = item.url,
+                vodId = batch.vodId,
+            )
             when (resolved) {
                 is EpisodeResolver.Result.Ok -> {
                     consecutiveResolveFailures = 0
