@@ -112,7 +112,9 @@ object PageSniffer {
 
     private fun originOf(pageUrl: String): String? {
         val parsed = pageUrl.toHttpUrlOrNull() ?: return null
-        val port = if (parsed.port == parsed.defaultPort) "" else ":" + parsed.port
+        val isDefaultPort = (parsed.scheme == "http" && parsed.port == 80) ||
+            (parsed.scheme == "https" && parsed.port == 443)
+        val port = if (isDefaultPort) "" else ":" + parsed.port
         return parsed.scheme + "://" + parsed.host + port
     }
 
