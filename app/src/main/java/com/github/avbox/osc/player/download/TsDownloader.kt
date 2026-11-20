@@ -66,6 +66,7 @@ data class TsTask(
     val percent: Float
         get() = when {
             state == Download.STATE_COMPLETED -> 100f
+            totalBytes > 0L && bytes > 0L -> (bytes.toFloat() * 100f / totalBytes.toFloat()).coerceIn(0f, 100f)
             totalSegments > 0 -> doneSegments.toFloat() * 100f / totalSegments.toFloat()
             else -> 0f
         }
@@ -225,6 +226,20 @@ object TsDownloader {
 
     /** 下载中的临时文件：Download/AVBox/<名字>.ts.part */
     fun partFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts.part")
+
+    /** 单文件直链（mp4/mkv/flv…）的扩展名，非直链返回空串 */
+    private fun sourceExt(url: String): String {
+        val path = url.lowercase().substringBefore('?')
+        return when {
+            path.endsWith(".mp4") -> ".mp4"
+            path.endsWith(".mkv") -> ".mkv"
+            path.endsWith(".flv") -> ".flv"
+            path.endsWith(".m4v") -> ".m4v"
+            path.endsWith(".mov") -> ".mov"
+            path.endsWith(".webm") -> ".webm"
+            else -> ""
+        }
+    }
 
     /** 成品（转换前）：Download/AVBox/<名字>.ts */
     fun tsFileOf(task: TsTask): File = File(publicDir(), safeName(task) + ".ts")
@@ -471,6 +486,13 @@ object TsDownloader {
         val id = task.id
         update(ctx, id, force = true) { it.copy(state = Download.STATE_DOWNLOADING, error = null) }
 
+        // 直链文件（mp4/mkv…）没有清单，整段下载即可
+        val ext = sourceExt(task.playUrl)
+        if (ext.isNotEmpty()) {
+            runSingleFile(ctx, task, ext, id)
+            return
+        }
+
         val segments = fetchSegments(task)
         if (segments.isEmpty()) throw IOException("清单里没有分片")
         AppLog.i(TAG + " segments=" + segments.size + " id=" + id)
@@ -537,9 +559,7 @@ object TsDownloader {
                     os.flush()
                     written += bytes.size
                     done++
-                    update(ctx, id) {
-                        it.copy(doneSegments = done, bytes = written, totalBytes = written)
-                    }
+                    update(ctx, id) { it.copy(doneSegments = done, bytes = written) }
                     launchOne()
                 }
             }
@@ -572,12 +592,92 @@ object TsDownloader {
             TAG + " done id=" + id + " size=" + target.length() +
                 " segments=" + segments.size + " file=" + target.absolutePath,
         )
+        // 时间轴体检：只统计不断点、不改文件，用来确认净化删分片是否造成 PTS 跳变
+        try {
+            val probe = TsProbe.scan(target)
+            if (probe != null) AppLog.i(TAG + " pts " + probe.toString() + " file=" + target.name)
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " pts probe failed: " + th.message)
+        }
+
         // 顺手排一次 MP4 封装（后台串行；失败保留 .ts 不影响播放）
         try {
             Mp4Converter.enqueue(ctx, target.absolutePath)
         } catch (th: Throwable) {
             AppLog.e(TAG + " enqueue convert failed: " + th.message)
         }
+    }
+
+    // ---------- 直链文件 ----------
+
+    private suspend fun runSingleFile(ctx: Context, task: TsTask, ext: String, id: String) {
+        val dir = publicDir()
+        if (!dir.canWrite()) {
+            throw IOException("下载目录不可写，请在系统设置里允许 AVBox 访问「所有文件」")
+        }
+        val part = File(dir, safeName(task) + ext + ".part")
+        val target = File(dir, safeName(task) + ext)
+        val start = if (part.exists()) part.length() else 0L
+        AppLog.i(TAG + " single-file id=" + id + " ext=" + ext + " resume=" + start)
+
+        val builder = Request.Builder().url(task.playUrl).get()
+        task.headers?.forEach { (key, value) ->
+            try {
+                builder.header(key, value)
+            } catch (ignored: Throwable) {
+            }
+        }
+        if (start > 0L) builder.header("Range", "bytes=" + start + "-")
+        client.newCall(builder.build()).execute().use { resp ->
+            if (!resp.isSuccessful) throw IOException("文件 HTTP " + resp.code)
+            val body = resp.body ?: throw IOException("空响应")
+            val remain = body.contentLength()
+            val total = if (remain > 0L) start + remain else 0L
+            update(ctx, id, force = true) { it.copy(bytes = start, totalBytes = total) }
+            body.byteStream().use { input ->
+                FileOutputStream(part, start > 0L).use { out ->
+                    val buffer = ByteArray(64 * 1024)
+                    var written = start
+                    var lastReport = written
+                    while (true) {
+                        if (paused.contains(id) || globalPaused) {
+                            if (globalPaused && !paused.contains(id)) stoppedByGlobal.add(id)
+                            out.flush()
+                            update(ctx, id, force = true) { it.copy(state = Download.STATE_STOPPED, bytes = written) }
+                            AppLog.i(TAG + " single-file paused at " + written)
+                            return
+                        }
+                        val n = input.read(buffer)
+                        if (n <= 0) break
+                        out.write(buffer, 0, n)
+                        written += n
+                        if (written - lastReport >= 1_000_000L) {
+                            lastReport = written
+                            out.flush()
+                            update(ctx, id) { it.copy(bytes = written) }
+                        }
+                    }
+                    out.flush()
+                    update(ctx, id) { it.copy(bytes = written) }
+                }
+            }
+        }
+
+        if (target.exists()) target.delete()
+        if (!part.renameTo(target)) {
+            part.copyTo(target, overwrite = true)
+            part.delete()
+        }
+        DownloadLibrary.markDone(task.playUrl, target.absolutePath)
+        update(ctx, id, force = true) {
+            it.copy(
+                state = Download.STATE_COMPLETED,
+                bytes = target.length(),
+                totalBytes = target.length(),
+                error = null,
+            )
+        }
+        AppLog.i(TAG + " single-file done id=" + id + " size=" + target.length() + " file=" + target.absolutePath)
     }
 
     // ---------- 清单 ----------
