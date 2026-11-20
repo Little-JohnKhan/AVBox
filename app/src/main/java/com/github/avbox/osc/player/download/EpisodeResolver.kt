@@ -104,7 +104,8 @@ object EpisodeResolver {
     }
 
     /** 调一次 getDetail，让 spider 建立这部剧的上下文（部分源的 playerContent 依赖它） */
-    private suspend fun warmUp(sourceKey: String, vodId: String) {
+    private suspend fun warmUp(sourceKey: String?, vodId: String) {
+        if (sourceKey.isNullOrEmpty()) return
         withContext(Dispatchers.Main) {
             val vm = SourceViewModel()
             try {
