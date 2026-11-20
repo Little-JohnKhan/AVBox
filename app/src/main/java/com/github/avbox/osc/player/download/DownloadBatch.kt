@@ -273,13 +273,13 @@ object DownloadBatch {
                     AppLog.e(TAG + " resolve failed " + item.name + " : " + resolved.reason)
                     markFailed(batchId, item.index, item.name, resolved.reason)
                     consecutiveResolveFailures++
-                    if (consecutiveResolveFailures >= 3) {
+                    if (consecutiveResolveFailures >= 2) {
                         val b = get(batchId)
                         if (b != null) finish(b)
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 context,
-                                "连续 3 集解析失败，已停止批量下载（" + resolved.reason + "）",
+                                "连续 2 集解析失败，已停止（" + resolved.reason + "）。该源可能不支持后台解析，可在播放页逐集点下载。",
                                 Toast.LENGTH_LONG,
                             ).show()
                         }

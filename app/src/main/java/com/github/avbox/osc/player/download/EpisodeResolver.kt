@@ -48,7 +48,7 @@ object EpisodeResolver {
         } catch (ignored: Throwable) {
         }
     }
-    private const val TIMEOUT_MS = 20_000L
+    private const val TIMEOUT_MS = 12_000L
 
     sealed interface Result {
         data class Ok(val url: String, val headers: Map<String, String>?) : Result
@@ -94,7 +94,30 @@ object EpisodeResolver {
         warmUp(sourceKey, vodId)
         val second = resolveViaSpider(sourceKey, flag, seriesUrl)
         debug("  after warmUp -> " + describe(second))
+        if (second !is Result.Ok) probeRaw(sourceKey, flag, seriesUrl)
         return second
+    }
+
+    /** 直接调一次 spider，把原始返回（或异常）写进日志，用来判断卡在哪 */
+    private suspend fun probeRaw(sourceKey: String?, flag: String?, url: String) {
+        try {
+            withContext(Dispatchers.IO) {
+                val bean = com.github.avbox.osc.api.ApiConfig.get().getSource(sourceKey)
+                if (bean == null) {
+                    debug("  raw -> 源不存在")
+                    return@withContext
+                }
+                val payload = try {
+                    val sp = com.github.avbox.osc.api.ApiConfig.get().getCSP(bean)
+                    sp.playerContent(flag, url, com.github.avbox.osc.api.ApiConfig.get().vipParseFlags)
+                } catch (th: Throwable) {
+                    "EX:" + th.javaClass.simpleName + ":" + th.message
+                }
+                debug("  raw playerContent -> " + (payload ?: "null").take(220))
+            }
+        } catch (th: Throwable) {
+            debug("  raw probe failed " + th.message)
+        }
     }
 
     private fun describe(result: Result): String = when (result) {
@@ -117,8 +140,9 @@ object EpisodeResolver {
                         }
                     }
                     vm.getDetail(sourceKey, vodId)
-                    signal.await()
+                    val ok = signal.await()
                     job.cancel()
+                    debug("  warmUp detail -> " + ok)
                 }
             } catch (th: Throwable) {
                 AppLog.e(TAG + " warmUp failed: " + th.message)
