@@ -192,7 +192,7 @@ object DownloadBatch {
             val item = batch.items.getOrNull(batch.cursor)
             if (item == null) {
                 val latest = get(batchId) ?: batch
-                finish(latest)
+                finish(context, latest)
                 withContext(Dispatchers.Main) {
                     val head = latest.failures.firstOrNull()?.let { " · " + it.name + "：" + it.reason }
                         ?: latest.sniff.firstOrNull()?.let { " · 需网页嗅探，请在该集播放页下载" }
@@ -275,7 +275,7 @@ object DownloadBatch {
                     consecutiveResolveFailures++
                     if (consecutiveResolveFailures >= 2) {
                         val b = get(batchId)
-                        if (b != null) finish(b)
+                        if (b != null) finish(context, b)
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 context,
@@ -312,8 +312,17 @@ object DownloadBatch {
         )
     }
 
-    private fun finish(batch: Batch) {
+    private fun finish(context: Context, batch: Batch) {
         save(batch.copy(state = STATE_DONE))
+        // 整批结束必须把「只下不转」的闸门放开，并把这批下好的 .ts 排进封装队列。
+        // 之前只改了批次状态，闸门永远停在 true，于是批量下载的文件永远不会变成 mp4。
+        TsDownloader.setTaskLimit(0)
+        Mp4Converter.setBatchMode(false)
+        try {
+            Mp4Converter.enqueueAll(context.applicationContext)
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " enqueue convert failed: " + th.message)
+        }
         AppLog.i(
             TAG + " finished " + batch.vodName +
                 " done=" + batch.done.size + " failed=" + batch.failures.size + " sniff=" + batch.sniff.size,

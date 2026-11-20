@@ -153,16 +153,25 @@ object Mp4Converter {
                         dst.delete()
                         state = State(src.absolutePath, src.name, dst.name, 0, failed = true)
                         AppLog.e(TAG + " verify failed " + src.name)
+                        DownloadLog.write("convert 校验失败 " + src.name + " out=" + dst.length() + " src=" + src.length())
                     }
                 } else {
                     temp.delete()
                     state = State(src.absolutePath, src.name, dst.name, 0, failed = true)
+                    DownloadLog.write("convert 未完成 " + src.name)
                 }
                 delay(700)
             }
         } catch (th: Throwable) {
             AppLog.e(TAG, "pump failed", th)
         } finally {
+            // 失败提示要留得住：状态一秒就清会让用户只看到一闪
+            if (state?.failed == true) {
+                try {
+                    kotlinx.coroutines.delay(6000)
+                } catch (ignored: Throwable) {
+                }
+            }
             state = null
             busy = false
         }
@@ -199,6 +208,10 @@ object Mp4Converter {
                         ) {
                             poller.cancel()
                             AppLog.e(TAG + " transform error: " + exception.message)
+                            DownloadLog.write(
+                                "convert 失败 " + src.name + " [" + exception.javaClass.simpleName + "] " +
+                                    exception.message + (exception.cause?.let { " cause=" + it.javaClass.simpleName + ": " + it.message } ?: ""),
+                            )
                             if (cont.isActive) cont.resume(false)
                         }
                     }
