@@ -94,7 +94,6 @@ object EpisodeResolver {
         warmUp(sourceKey, vodId)
         val second = resolveViaSpider(sourceKey, flag, seriesUrl)
         debug("  after warmUp -> " + describe(second))
-        if (second !is Result.Ok) probeRaw(sourceKey, flag, seriesUrl)
         return second
     }
 
@@ -150,58 +149,43 @@ object EpisodeResolver {
         }
     }
 
+    /**
+     * 直接调精灵：不走 SourceViewModel / PlayLoader 那条播放链路。
+     *
+     * 播放链路里对 url 做 push 包装、还给精灵调用套了很短的超时，
+     * 后台批量不需要那些，直接调 playerContent(flag, url, vipFlags) 又快又准。
+     */
     private suspend fun resolveViaSpider(sourceKey: String?, flag: String?, seriesUrl: String): Result {
-        return withContext(Dispatchers.Main) {
-            val vm = SourceViewModel()
-            var collector: Job? = null
-            var gotEvent = false
-            try {
-                val requested = java.util.concurrent.atomic.AtomicBoolean(false)
-                val info = withTimeoutOrNull(TIMEOUT_MS) {
-                    val signal = CompletableDeferred<JSONObject?>()
-                    collector = launch {
-                        vm.playResult.flow.collect { value ->
-                            if (signal.isCompleted) return@collect
-                            // 非空＝真实结果；getPlay 之后来的空值＝明确失败（源侧返回 null）
-                            if (value != null) {
-                                gotEvent = true
-                                signal.complete(value)
-                            } else if (requested.get()) {
-                                gotEvent = true
-                                signal.complete(null)
-                            }
-                        }
-                    }
-                    vm.getPlay(sourceKey, flag, null, seriesUrl, null)
-                    requested.set(true)
-                    signal.await()
-                }
-                if (info == null) {
-                    if (gotEvent) {
-                        Result.Failed("源返回空结果（该集可能已下线或无可用线路）")
-                    } else {
-                        Result.Failed("解析超时 20 秒（精灵响应过慢）")
-                    }
-                } else {
-                    val parsed = parse(info)
-                    AppLog.i(
-                        TAG + " result=" + parsed.javaClass.simpleName +
-                            " parse=" + info.optString("parse", "-") +
-                            " jx=" + info.optString("jx", "-") +
-                            " url=" + info.optString("url", "").take(80),
-                    )
-                    parsed
-                }
+        val bean = com.github.avbox.osc.api.ApiConfig.get().getSource(sourceKey)
+            ?: return Result.Failed("源未找到（" + (sourceKey ?: "空") + "）")
+        return withContext(Dispatchers.IO) {
+            val payload = try {
+                val sp = com.github.avbox.osc.api.ApiConfig.get().getCSP(bean)
+                sp.playerContent(flag, seriesUrl, com.github.avbox.osc.api.ApiConfig.get().vipParseFlags)
             } catch (th: Throwable) {
-                AppLog.e(TAG + " resolve failed: " + th.message)
-                Result.Failed(th.message ?: "解析失败")
-            } finally {
-                collector?.cancel()
+                debug("  spider EX: " + th.javaClass.simpleName + ":" + th.message)
+                return@withContext Result.Failed("精灵异常：" + (th.message ?: th.javaClass.simpleName))
             }
+            if (payload.isNullOrEmpty()) {
+                return@withContext Result.Failed("源返回空结果（该集可能已下线或无可用线路）")
+            }
+            val info = try {
+                JSONObject(payload)
+            } catch (th: Throwable) {
+                return@withContext Result.Failed("源返回内容不是 JSON")
+            }
+            val parsed = parse(info)
+            debug(
+                "  spider ok parse=" + info.optString("parse", "-") +
+                    " jx=" + info.optString("jx", "-") +
+                    " url=" + info.optString("url", "").take(80) +
+                    " -> " + describe(parsed),
+            )
+            parsed
         }
     }
 
-    private fun parse(info: JSONObject): Result {
+    private suspend fun parse(info: JSONObject): Result {
         val msg = info.optString("msg", "")
         if (msg.isNotEmpty()) return Result.Failed(msg)
 
@@ -221,6 +205,17 @@ object EpisodeResolver {
             return Result.Ok(full, headers)
         }
         if (info.optString("parse", "1") == "1" || info.optString("jx", "0") == "1") {
+            // 需要嗅探：先交给配置里的 HTTP 解析接口（type=1）试一次，
+            // 解析不出来才真的算「只能在播放页下载」
+            val sniffUrl = if (full.startsWith("http", ignoreCase = true)) full else ""
+            if (sniffUrl.isNotEmpty()) {
+                val hit = JxParser.parse(sniffUrl)
+                if (hit != null) {
+                    debug("  jx 解出真实地址 " + hit.url.take(100))
+                    return Result.Ok(hit.url, hit.headers)
+                }
+                debug("  jx 未命中，需要播放页嗅探")
+            }
             return Result.NeedSniff
         }
         if (full.startsWith("http", ignoreCase = true)) return Result.Ok(full, headers)
