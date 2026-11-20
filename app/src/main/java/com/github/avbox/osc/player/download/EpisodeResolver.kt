@@ -209,12 +209,19 @@ object EpisodeResolver {
             // 解析不出来才真的算「只能在播放页下载」
             val sniffUrl = if (full.startsWith("http", ignoreCase = true)) full else ""
             if (sniffUrl.isNotEmpty()) {
+                // 先按「解析页自带服务端接口」的方式换地址（hhjx 这类站点）
+                val page = PageSniffer.sniff(sniffUrl)
+                if (page != null) {
+                    debug("  pageSniff 解出真实地址 " + page.url.take(110))
+                    return Result.Ok(page.url, page.headers)
+                }
+                // 再退到配置里的 HTTP 解析接口
                 val hit = JxParser.parse(sniffUrl)
                 if (hit != null) {
                     debug("  jx 解出真实地址 " + hit.url.take(100))
                     return Result.Ok(hit.url, hit.headers)
                 }
-                debug("  jx 未命中，需要播放页嗅探")
+                debug("  pageSniff/jx 均未命中，需要播放页嗅探")
             }
             return Result.NeedSniff
         }
