@@ -162,8 +162,29 @@ internal fun DownloadsTab(
             item(key = "batch-card") { BatchCard(currentBatch) }
         }
 
-        if (rows.isNotEmpty()) {
-            item(key = "task-header") { SectionTitle("下载中 · " + rows.size + " 个任务") }
+        val batchRunning = currentBatch != null && currentBatch.state != DownloadBatch.STATE_DONE
+        if (rows.isNotEmpty() || batchRunning) {
+            item(key = "task-header") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SectionTitle(
+                        text = if (rows.isEmpty()) "批量任务" else "下载中 · " + rows.size + " 个任务",
+                        modifier = Modifier.weight(1f),
+                    )
+                    PauseAllButton(pausedAll) {
+                        scope.launch {
+                            if (pausedAll) {
+                                DownloadBatch.resumeAll(context)
+                            } else {
+                                DownloadBatch.pauseAll(context)
+                            }
+                            pausedAll = TsDownloader.isPausedAll()
+                        }
+                    }
+                }
+            }
             items(rows, key = { "task:" + it.item.id }) { row ->
                 val key = "task:" + row.item.id
                 DownloadRowCard(
@@ -195,31 +216,9 @@ internal fun DownloadsTab(
         }
 
         item(key = "file-header") {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SectionTitle(
-                    text = "Download/AVBox · " + files.size + " 个文件",
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(
-                    onClick = {
-                        scope.launch {
-                            if (pausedAll) {
-                                DownloadBatch.resumeAll(context)
-                            } else {
-                                DownloadBatch.pauseAll(context)
-                            }
-                            pausedAll = TsDownloader.isPausedAll()
-            batch = DownloadBatch.current()
-                        }
-                    },
-                ) {
-                    Text(if (pausedAll) "全部开始" else "全部暂停")
-                }
-            }
+            SectionTitle("Download/AVBox · " + files.size + " 个文件")
         }
+
         if (!hasAllFiles) {
             item(key = "file-permission") {
                 AllFilesPermissionCard(context)
@@ -282,6 +281,16 @@ internal fun DownloadsTab(
             },
             dismissButton = { TextButton(onClick = { pendingDeleteFile = null }) { Text("取消") } },
         )
+    }
+}
+
+@Composable
+private fun PauseAllButton(pausedAll: Boolean, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 8.dp),
+    ) {
+        Text(if (pausedAll) "全部开始" else "全部暂停")
     }
 }
 

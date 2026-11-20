@@ -50,6 +50,9 @@ object EpisodeResolver {
     }
     private const val TIMEOUT_MS = 12_000L
 
+    /** 用来在 spider 返回里找「源做过过滤」的线索词 */
+    private val FILTER_HINTS = listOf("过滤", "广告", "去除", "屏蔽", "filter", "purify", "removeAds")
+
     sealed interface Result {
         data class Ok(val url: String, val headers: Map<String, String>?) : Result
 
@@ -173,6 +176,21 @@ object EpisodeResolver {
                 JSONObject(payload)
             } catch (th: Throwable) {
                 return@withContext Result.Failed("源返回内容不是 JSON")
+            }
+            // 探针：源的过滤痕迹可能藏在返回 JSON 里（msg / ads / filter 之类字段）。
+            // 有的话就能当「源已过滤」的信号用，比 toast 可靠（toast 在 jar 里拦不到）。
+            try {
+                val keys = info.keys().asSequence().toList()
+                val payloadHits = FILTER_HINTS.filter { payload.contains(it, ignoreCase = true) }
+                debug(
+                    "  spider keys=" + keys +
+                        (if (payloadHits.isEmpty()) "" else " ★含过滤线索=" + payloadHits) +
+                        " len=" + payload.length,
+                )
+                if (payloadHits.isNotEmpty() || keys.any { it.equals("ads", true) || it.equals("filter", true) }) {
+                    debug("  ★ 源返回原文: " + payload.take(400))
+                }
+            } catch (ignored: Throwable) {
             }
             val parsed = parse(info)
             debug(

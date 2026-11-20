@@ -64,6 +64,11 @@ object Mp4Converter {
 
     fun isBusy(): Boolean = state != null
 
+    /** 还有没有活要干（正在转 + 排队中）。前台服务靠它决定能不能退出 */
+    fun hasWork(): Boolean = busy || state != null || pending.isNotEmpty()
+
+    fun pendingCount(): Int = pending.size
+
     /** 排队转换一个 .ts；同一路径不会重复入队 */
     fun enqueue(context: Context, tsPath: String) {
         val app = context.applicationContext

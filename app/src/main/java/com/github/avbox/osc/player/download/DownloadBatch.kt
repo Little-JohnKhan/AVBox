@@ -62,6 +62,12 @@ object DownloadBatch {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
 
+    /** 批量是否在推进（含「解析下一集」的空窗期）。前台服务靠它决定能不能退出 */
+    @Volatile
+    private var running = false
+
+    fun isRunning(): Boolean = running
+
     /** 内存里的最新批次：UI 每秒读它，避免反复反序列化 KV */
     @Volatile
     private var memBatch: Batch? = null
@@ -132,6 +138,7 @@ object DownloadBatch {
 
         TsDownloader.setTaskLimit(1)
         Mp4Converter.setBatchMode(true)
+        running = true
         Toast.makeText(app, "已开始批量下载 " + items.size + " 集", Toast.LENGTH_SHORT).show()
         job?.cancel()
         job = scope.launch { run(app, batch.id) }
@@ -155,23 +162,25 @@ object DownloadBatch {
         if (job?.isActive == true) return
         TsDownloader.setTaskLimit(1)
         Mp4Converter.setBatchMode(true)
+        running = true
         job = scope.launch { run(app, batch.id) }
     }
 
     fun pauseAll(context: Context) {
         TsDownloader.setPausedAll(context, true)
-        val batch = activeBatch() ?: return
-        save(batch.copy(state = STATE_PAUSED))
+        // 所有未完成批次都标记暂停：之前只改 activeBatch() 那一个，
+        // 一旦存在历史遗留批次，卡片上的「已暂停」就可能改不回来
+        for (b in all().filter { it.state != STATE_DONE }) save(b.copy(state = STATE_PAUSED))
     }
 
     fun resumeAll(context: Context) {
         TsDownloader.setPausedAll(context, false)
-        val batch = activeBatch() ?: return
-        if (batch.state == STATE_PAUSED) save(batch.copy(state = STATE_RUNNING))
+        for (b in all().filter { it.state == STATE_PAUSED }) save(b.copy(state = STATE_RUNNING))
         resumeRunning(context)
     }
 
     fun stop(context: Context) {
+        running = false
         job?.cancel()
         job = null
         TsDownloader.setTaskLimit(0)
@@ -181,6 +190,14 @@ object DownloadBatch {
     // ---------- 主循环 ----------
 
     private suspend fun run(context: Context, batchId: String) {
+        try {
+            runLoop(context, batchId)
+        } finally {
+            running = false
+        }
+    }
+
+    private suspend fun runLoop(context: Context, batchId: String) {
         var consecutiveResolveFailures = 0
         while (true) {
             val batch = get(batchId) ?: return
@@ -313,6 +330,7 @@ object DownloadBatch {
     }
 
     private fun finish(context: Context, batch: Batch) {
+        running = false
         save(batch.copy(state = STATE_DONE))
         // 整批结束必须把「只下不转」的闸门放开，并把这批下好的 .ts 排进封装队列。
         // 之前只改了批次状态，闸门永远停在 true，于是批量下载的文件永远不会变成 mp4。

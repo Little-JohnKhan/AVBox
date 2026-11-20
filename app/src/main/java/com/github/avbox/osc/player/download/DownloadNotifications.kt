@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.media3.exoplayer.offline.Download
@@ -108,6 +109,14 @@ class DownloadForegroundService : Service() {
 
     private var ticker: Job? = null
 
+    /** 空活计时：下载结束后再撑一会儿，等封装入队 */
+    private var idleSince = 0L
+
+    private companion object {
+        /** 空闲宽限期：给「下载完成 → 封装入队 → 转换开始」留出时间 */
+        const val IDLE_GRACE_MS = 8000L
+    }
+
     override fun onCreate() {
         super.onCreate()
         DownloadNotifications.ensureChannel(this)
@@ -139,12 +148,37 @@ class DownloadForegroundService : Service() {
                 it.state == Download.STATE_QUEUED ||
                 it.state == Download.STATE_RESTARTING
         }
+        if (active.isNotEmpty()) idleSince = 0L
         val conv = Mp4Converter.state
         if (active.isEmpty()) {
             if (conv == null) {
+                // 下载刚结束、封装还没入队，或者还在排队：服务必须继续活着。
+                // Android 12+ 禁止 App 在后台 startForegroundService，一旦这里退出了，
+                // 后面的转换就再也拉不起前台服务，进程会被系统冻结、转换停在原地。
+                // （剧集能显示通知、大电影不能，就是这个时序差：剧集赶在窗口内，大电影已经掉到后台）
+                if (Mp4Converter.hasWork()) {
+                    DownloadNotifications.notify(this, "离线下载", "等待封装 · 剩余 " + Mp4Converter.pendingCount() + " 个", 0)
+                    idleSince = 0L
+                    return
+                }
+                // 批量下载在推进时也要撑住：一集下完后调度器要去解析下一集，
+                // 这个空窗期没有「活跃下载任务」，但整批还没结束，服务一退就再也拉不起来
+                //（Android 12+ 禁止后台启动前台服务）——表现就是「下完一集通知消失，后面几集没通知」。
+                if (DownloadBatch.isRunning()) {
+                    DownloadNotifications.notify(this, "离线下载", "正在解析下一集…", 0)
+                    idleSince = 0L
+                    return
+                }
+                val now = SystemClock.elapsedRealtime()
+                if (idleSince == 0L) idleSince = now
+                if (now - idleSince < IDLE_GRACE_MS) {
+                    DownloadNotifications.notify(this, "离线下载", "收尾中…", 100)
+                    return
+                }
                 stopSelfSafely()
                 return
             }
+            idleSince = 0L
             // 没有下载任务、但在封装：界面不能停，否则进程掉进 cached 会被冻结
             val text = if (conv.failed) {
                 "封装失败，保留 ts 直接播 · " + conv.sourceName
