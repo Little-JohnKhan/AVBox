@@ -62,6 +62,10 @@ data class TsTask(
     val totalBytes: Long = 0L,
     val error: String? = null,
     val createdAt: Long = 0L,
+    /** 每个分片的 EXTINF（秒）；用于「按 EXTINF 重建时间轴」 */
+    val durations: List<Double> = emptyList(),
+    /** 每个分片的 TS 包数；用来把 PES 归到对应的分片 */
+    val segmentPackets: List<Int> = emptyList(),
 ) {
     val percent: Float
         get() = when {
@@ -501,8 +505,10 @@ object TsDownloader {
             return
         }
 
-        val segments = fetchSegments(task)
+        val playlist = fetchSegments(task)
+        val segments = playlist.urls
         if (segments.isEmpty()) throw IOException("清单里没有分片")
+        val durations = playlist.durations
         AppLog.i(TAG + " segments=" + segments.size + " id=" + id)
 
         val dir = publicDir()
@@ -533,8 +539,19 @@ object TsDownloader {
             part.delete()
         }
         var written = if (part.exists()) part.length() else 0L
+        // 续传时沿用旧记录里已写分片的包数（长度对得上才用）
+        val segPackets = ArrayList<Int>()
+        if (startIndex > 0 && task.segmentPackets.size == startIndex) {
+            segPackets.addAll(task.segmentPackets)
+        }
         update(ctx, id, force = true) {
-            it.copy(totalSegments = segments.size, doneSegments = startIndex, bytes = written)
+            it.copy(
+                totalSegments = segments.size,
+                doneSegments = startIndex,
+                bytes = written,
+                durations = durations,
+                segmentPackets = ArrayList(segPackets),
+            )
         }
 
         var done = startIndex
@@ -570,6 +587,7 @@ object TsDownloader {
                     os.write(bytes)
                     os.flush()
                     written += bytes.size
+                    if (segPackets.size < segments.size) segPackets.add(bytes.size / 188)
                     done++
                     update(ctx, id) { it.copy(doneSegments = done, bytes = written) }
                     launchOne()
@@ -597,6 +615,7 @@ object TsDownloader {
                 totalBytes = target.length(),
                 doneSegments = segments.size,
                 totalSegments = segments.size,
+                segmentPackets = ArrayList(segPackets),
                 error = null,
             )
         }
@@ -604,11 +623,30 @@ object TsDownloader {
             TAG + " done id=" + id + " size=" + target.length() +
                 " segments=" + segments.size + " file=" + target.absolutePath,
         )
-        // 时间轴处理：源站残缺分片留下 PTS 空洞，转 MP4 时会被写成「一帧显示 2 秒」
-        // （画面定格）并且音频比视频短（越播越超前）。先重写成连续时间轴再体检。
+        // 时间轴处理，两种策略：
+        //  A. PTS 跨度远大于「EXTINF 总和」（内容 23 分钟、PTS 却 45 分钟这类拼接流）：
+        //     按 EXTINF 重建，与 IDM 合并 mp4 的做法一致——只信清单时长，不信原始 PTS；
+        //  B. 其它情况：沿用按段平移（补空洞）。
         try {
-            val stat = TsFixer.fix(target)
-            if (stat != null) DownloadLog.write("fixer " + stat.toString() + " file=" + target.name)
+            var handled = false
+            val probeBefore = TsProbe.scan(target)
+            val extinfTicks = Math.round(durations.sum() * 90000.0)
+            if (probeBefore != null && extinfTicks > 0 && segPackets.size == durations.size) {
+                val spanTicks = probeBefore.spanMs * 90
+                if (spanTicks > extinfTicks * 13 / 10) {
+                    DownloadLog.write(
+                        "rebuild 触发：PTS 跨度 " + probeBefore.spanMs / 1000 + "s vs EXTINF 总和 " +
+                            (extinfTicks / 90000) + "s",
+                    )
+                    val rb = TsFixer.rebuildByExtinf(target, durations, segPackets)
+                    DownloadLog.write("rebuild 结果 " + (rb?.toString() ?: "null"))
+                    handled = true
+                }
+            }
+            if (!handled) {
+                val stat = TsFixer.fix(target)
+                if (stat != null) DownloadLog.write("fixer " + stat.toString() + " file=" + target.name)
+            }
         } catch (th: Throwable) {
             AppLog.e(TAG + " fixer failed: " + th.message)
         }
@@ -701,7 +739,9 @@ object TsDownloader {
 
     // ---------- 清单 ----------
 
-    private fun fetchSegments(task: TsTask): List<String> {
+    private class Playlist(val urls: List<String>, val durations: List<Double>)
+
+    private fun fetchSegments(task: TsTask): Playlist {
         var base = task.playUrl
         var content = httpText(base, task.headers)
         var depth = 0
@@ -735,10 +775,24 @@ object TsDownloader {
                 DownloadLog.write("purify dropped=" + (before - after) + "/" + before + " " + result.toString())
             }
         }
-        return text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-            .map { M3u8Purifier.resolve(base, it) }
+        // 同时收集 EXTINF：后面「按 EXTINF 重建时间轴」要用它当权威时长
+        val urls = ArrayList<String>()
+        val durs = ArrayList<Double>()
+        var pendingDur = 0.0
+        for (raw in text.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#EXTINF")) {
+                pendingDur = line.substringAfter(':', "")
+                    .substringBefore(',').trim().toDoubleOrNull() ?: 0.0
+                continue
+            }
+            if (line.startsWith("#")) continue
+            urls.add(M3u8Purifier.resolve(base, line))
+            durs.add(pendingDur)
+            pendingDur = 0.0
+        }
+        return Playlist(urls, durs)
     }
 
     /** 本地净化代理地址（清单已经被洗过一遍） */

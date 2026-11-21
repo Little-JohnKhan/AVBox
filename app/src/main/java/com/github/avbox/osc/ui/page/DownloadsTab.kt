@@ -161,7 +161,7 @@ internal fun DownloadsTab(
     ) {
         val currentBatch = batch
         if (currentBatch != null) {
-            item(key = "batch-card") { BatchCard(currentBatch) }
+            item(key = "batch-card") { BatchCard(currentBatch, context) }
         }
 
         val batchRunning = currentBatch != null && currentBatch.state != DownloadBatch.STATE_DONE
@@ -340,7 +340,7 @@ private fun PauseAllButton(pausedAll: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun BatchCard(batch: DownloadBatch.Batch) {
+private fun BatchCard(batch: DownloadBatch.Batch, context: android.content.Context) {
     val done = batch.state == DownloadBatch.STATE_DONE
     Column(
         modifier = Modifier
@@ -370,13 +370,18 @@ private fun BatchCard(batch: DownloadBatch.Batch) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 8.dp),
             )
-            if (done) {
-                TextButton(
-                    onClick = { DownloadBatch.clearFinished() },
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) {
-                    Text("清除", style = MaterialTheme.typography.labelMedium)
-                }
+            TextButton(
+                onClick = {
+                    if (done) {
+                        DownloadBatch.clearFinished()
+                    } else {
+                        // 中途也能关掉：停调度、移除卡片，已下的文件不动
+                        DownloadBatch.abort(context, batch.id)
+                    }
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) {
+                Text("清除", style = MaterialTheme.typography.labelMedium)
             }
         }
         Text(

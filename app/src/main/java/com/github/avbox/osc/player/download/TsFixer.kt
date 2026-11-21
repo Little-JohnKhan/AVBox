@@ -181,6 +181,173 @@ object TsFixer {
         }
     }
 
+    /**
+     * 按清单的 EXTINF 重建时间轴（解决「内容 23 分钟、PTS 跨度 45 分钟」这类拼接流）。
+     *
+     * 原理与 IDM 合并 mp4 一致：**不信任原始 PTS，只按分片顺序和每片时长重新排**。
+     *   - 分片 i 的起始时间 = 前面所有 EXTINF 之和
+     *   - 分片内：newPts = 分片起始 + (原Pts − 该片首帧原Pts)，段内节奏完全保留
+     *   - 音频同理，用音频自己在同一分片的首个 PES 作为基准
+     *
+     * @param durations       每个分片的 EXTINF（秒），长度必须等于分片数
+     * @param segmentPackets  每个分片包含的 TS 包数，用来把 PES 归到分片
+     *
+     * 修完必过自检：帧数不变、DTS 递增、跨度 ≈ EXTINF 总和、音频 PTS 单调。不过就保留原文件。
+     */
+    fun rebuildByExtinf(file: File, durations: List<Double>, segmentPackets: List<Int>): Stat? {
+        var tmp: File? = null
+        return try {
+            if (durations.isEmpty() || durations.size != segmentPackets.size) return null
+            val size = file.length()
+            if (size < PACKET.toLong() * 100L || size % PACKET != 0L) return null
+
+            val video = ArrayList<PesRef>(1 shl 16)
+            val audio = ArrayList<PesRef>(1 shl 14)
+            if (!scan(file, video, audio)) return null
+            if (video.size < 50) return null
+            val frameTicks = medianFrameTicks(video) ?: return null
+
+            // 分片边界（包序号）
+            val starts = LongArray(segmentPackets.size + 1)
+            for (i in segmentPackets.indices) starts[i + 1] = starts[i] + segmentPackets[i]
+            val totalPackets = starts[segmentPackets.size]
+            if (totalPackets <= 0L) return null
+
+            // 每片起始时间（ticks）
+            val segStart = LongArray(segmentPackets.size)
+            var acc = 0.0
+            for (i in durations.indices) {
+                segStart[i] = Math.round(acc * 90000.0)
+                acc += durations[i]
+            }
+            val expectSpan = Math.round(acc * 90000.0)
+
+            // 每片首帧基准
+            val firstV = HashMap<Int, LongArray>()   // seg -> (pts, dts)
+            for (ref in video) {
+                val seg = segOf(starts, ref.packet.toLong())
+                if (seg < 0 || seg >= segmentPackets.size) continue
+                if (!firstV.containsKey(seg)) firstV[seg] = longArrayOf(ref.pts, ref.dts)
+            }
+            val firstA = HashMap<Int, Long>()
+            for (ref in audio) {
+                val seg = segOf(starts, ref.packet.toLong())
+                if (seg < 0 || seg >= segmentPackets.size) continue
+                if (!firstA.containsKey(seg)) firstA[seg] = ref.pts
+            }
+
+            val vPts = LongArray(video.size)
+            val vDts = LongArray(video.size)
+            var vi = 0
+            for (ref in video) {
+                val seg = segOf(starts, ref.packet.toLong())
+                val base = if (seg in segStart.indices) segStart[seg] else 0L
+                val f = firstV[seg]
+                if (f == null) {
+                    vPts[vi] = ref.pts
+                    vDts[vi] = ref.dts
+                } else {
+                    vPts[vi] = base + (ref.pts - f[0])
+                    vDts[vi] = base + (ref.dts - f[1])
+                }
+                vi++
+            }
+
+            // 音频：没有基准的分片沿用最近一个有效基准
+            val aPts = LongArray(audio.size)
+            var ai = 0
+            var lastSegWithBase = -1
+            for (ref in audio) {
+                val seg = segOf(starts, ref.packet.toLong())
+                if (firstA.containsKey(seg)) lastSegWithBase = seg
+                val baseSeg = if (firstA.containsKey(seg)) seg else lastSegWithBase
+                if (baseSeg >= 0 && baseSeg < segStart.size) {
+                    val f = firstA[baseSeg] ?: ref.pts
+                    aPts[ai] = segStart[baseSeg] + (ref.pts - f)
+                } else {
+                    aPts[ai] = ref.pts
+                }
+                ai++
+            }
+            // 音频强制单调，避免基准切换造成的微小回退
+            for (j in 1 until aPts.size) if (aPts[j] <= aPts[j - 1]) aPts[j] = aPts[j - 1] + 1
+
+            val tmpFile = File(file.parentFile, file.name + ".rb")
+            tmp = tmpFile
+            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts)
+
+            val problem = verifySpan(tmpFile, frameTicks, video.size, audio.size, expectSpan)
+            if (problem != null) {
+                AppLog.e(TAG + " 重建自检不通过，放弃：" + problem)
+                tmpFile.delete()
+                tmp = null
+                return Stat(
+                    video.size, audio.size, segmentPackets.size, frameTicks / 90.0,
+                    0, 0, false, "重建自检失败:" + problem,
+                )
+            }
+            if (!tmpFile.renameTo(file)) {
+                tmpFile.copyTo(file, overwrite = true)
+                tmpFile.delete()
+            }
+            tmp = null
+            val stat = Stat(
+                video.size, audio.size, segmentPackets.size, frameTicks / 90.0,
+                0, 0, true, "按EXTINF重建",
+            )
+            AppLog.i(TAG + " 重建完成 " + stat.toString() + " file=" + file.name)
+            stat
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " 重建失败: " + th.message)
+            try {
+                tmp?.delete()
+            } catch (ignored: Throwable) {
+            }
+            null
+        }
+    }
+
+    /** PES 所在的包序号属于哪个分片，找不到返回 -1 */
+    private fun segOf(starts: LongArray, packet: Long): Int {
+        var lo = 0
+        var hi = starts.size - 2
+        if (hi < 0) return -1
+        if (packet < starts[0] || packet >= starts[hi + 1]) return -1
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (starts[mid] <= packet) lo = mid else hi = mid - 1
+        }
+        return lo
+    }
+
+    /** 重建后的自检：帧数、DTS 递增、跨度必须对上 EXTINF 总和、音频单调 */
+    private fun verifySpan(
+        file: File,
+        frameTicks: Long,
+        videoCount: Int,
+        audioCount: Int,
+        expectSpan: Long,
+    ): String? {
+        val video = ArrayList<PesRef>(1 shl 16)
+        val audio = ArrayList<PesRef>(1 shl 14)
+        if (!scan(file, video, audio)) return "包结构错乱"
+        if (video.size != videoCount) return "视频 PES 数不符 " + video.size + "≠" + videoCount
+        if (audio.size != audioCount) return "音频 PES 数不符 " + audio.size + "≠" + audioCount
+        for (i in 1 until video.size) {
+            val d = video[i].dts - video[i - 1].dts
+            if (d <= 0L || d > frameTicks * 2) return "视频 DTS 间隔异常 " + d
+        }
+        for (j in 1 until audio.size) {
+            if (audio[j].pts < audio[j - 1].pts) return "音频 PTS 非单调 @" + j
+        }
+        val span = video.last().dts - video.first().dts + frameTicks
+        val diff = Math.abs(span - expectSpan)
+        if (diff > 90000L * 2) {
+            return "跨度不符 span=" + (span / 90000) + "s expect=" + (expectSpan / 90000) + "s"
+        }
+        return null
+    }
+
     /** 二分找该时刻所属段的平移量 */
     private fun offsetAt(starts: List<Long>, offsets: List<Long>, t: Long): Long {
         var lo = 0

@@ -199,17 +199,44 @@ object DownloadBatch {
 
     fun resumeAll(context: Context) {
         TsDownloader.setPausedAll(context, false)
-        // 关键：只清全局标志是不够的。单任务的暂停标记还在 TsDownloader 的 paused 集合里，
-        // 状态仍是 STOPPED，于是 run() 里 awaitOutcome 立刻返回 STOPPED，
-        // 命中「单集暂停 → 整批暂停」的分支，卡片又被按回「已暂停」，后续集也不再推进。
-        // 所以这里要逐个把它们恢复起来。
-        for (task in TsDownloader.snapshot()) {
-            if (task.state == Download.STATE_STOPPED) {
-                scope.launch { TsDownloader.resume(context.applicationContext, task.id) }
+        // 顺序很重要：必须**先把单任务真正恢复**（suspend 等它们落到 DOWNLOADING），
+        // 再把批次置回 RUNNING 并重启调度。
+        // 之前是 scope.launch 异步恢复 + 立刻 resumeRunning，run() 那边先读到 STOPPED，
+        // 于是命中「单集暂停 → 整批暂停」的分支，卡片又被按回「已暂停」，
+        // 表现就是「任务在下载中，卡片却写着已暂停」。
+        scope.launch {
+            for (task in TsDownloader.snapshot()) {
+                if (task.state == Download.STATE_STOPPED) {
+                    TsDownloader.resume(context.applicationContext, task.id)
+                }
             }
+            for (b in all().filter { it.state == STATE_PAUSED }) save(b.copy(state = STATE_RUNNING))
+            resumeRunning(context)
         }
-        for (b in all().filter { it.state == STATE_PAUSED }) save(b.copy(state = STATE_RUNNING))
-        resumeRunning(context)
+    }
+
+    /** 中途关闭批次：停调度、放开封装闸门、移除卡片；已下载的文件和任务列表都保留 */
+    fun abort(context: Context, id: String) {
+        if (runningBatchId == id || runningBatchId == null) {
+            job?.cancel()
+            job = null
+            runningBatchId = null
+        }
+        running = false
+        TsDownloader.setTaskLimit(0)
+        Mp4Converter.setBatchMode(false)
+        try {
+            val list = all().filterNot { it.id == id }
+            memBatch = null
+            KV.put(KEY, gson.toJson(list, storeType))
+        } catch (th: Throwable) {
+            AppLog.e(TAG + " abort failed: " + th.message)
+        }
+        try {
+            Mp4Converter.enqueueAll(context.applicationContext)
+        } catch (ignored: Throwable) {
+        }
+        AppLog.i(TAG + " abort " + id)
     }
 
     fun stop(context: Context) {
@@ -306,9 +333,15 @@ object DownloadBatch {
                         TsDownloader.Outcome.STOPPED -> {
                             // 全部暂停：游标不动，等恢复后重新解析这一集（.part 会续传）
                             if (TsDownloader.isPausedAll()) continue
-                            // 单集被暂停：整批一起暂停，**不记失败**。
-                            // 之前记成「被暂停，未下完」，用户恢复下载后这条失败记录永远不会消失，
-                            // 卡片就一直是「已完成 · 失败 1 · 第N集：被暂停，未下完」。
+                            // 「全部开始」恢复任务是异步的：这里先等一拍，再按真实状态判断。
+                            // 只要任务还在排/在下/已完成，就不是「用户暂停了这一集」，继续等它。
+                            delay(1000)
+                            val st = TsDownloader.get(taskId)?.state
+                            if (st != null && st != Download.STATE_STOPPED) {
+                                AppLog.i(TAG + " task " + taskId + " state=" + st + " 继续等待")
+                                continue
+                            }
+                            // 真的是单集被暂停：整批一起暂停，**不记失败**
                             AppLog.i(TAG + " paused by single task, suspend batch cursor=" + batch.cursor)
                             save(get(batchId)?.copy(state = STATE_PAUSED) ?: batch.copy(state = STATE_PAUSED))
                             return
