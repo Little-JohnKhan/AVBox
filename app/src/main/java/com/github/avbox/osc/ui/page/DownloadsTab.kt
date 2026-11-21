@@ -86,6 +86,8 @@ internal fun DownloadsTab(
     var pendingDeleteFile by remember { mutableStateOf<LocalVideo?>(null) }
     var pausedAll by remember { mutableStateOf(TsDownloader.isPausedAll()) }
     var batch by remember { mutableStateOf<DownloadBatch.Batch?>(null) }
+    // 封装状态：Compose 的 state，读它会自动订阅，进度变化会触发重组
+    val converting = Mp4Converter.state
 
     LaunchedEffect(Unit) {
         var tick = 0
@@ -215,6 +217,12 @@ internal fun DownloadsTab(
             }
         }
 
+        if (converting != null && !converting.failed) {
+            item(key = "convert-hint") {
+                ConvertHintCard(converting.sourceName, converting.percent)
+            }
+        }
+
         item(key = "file-header") {
             SectionTitle("Download/AVBox · " + files.size + " 个文件")
         }
@@ -280,6 +288,43 @@ internal fun DownloadsTab(
                 }) { Text("删除") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteFile = null }) { Text("取消") } },
+        )
+    }
+}
+
+/**
+ * 封装中提示。
+ *
+ * 系统（如 ColorOS 的应用冻结）会把后台进程整个冻住，连独立线程都停，
+ * 前台服务也挡不住，只有切回前台才继续。这里明确告诉用户该怎么做。
+ */
+@Composable
+private fun ConvertHintCard(name: String, percent: Int) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = "正在封装 " + percent + "% · " + name,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = "封装期间需保持前台或忽略电池优化",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        LinearProgressIndicator(
+            progress = { (percent.coerceIn(0, 100)) / 100f },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
         )
     }
 }

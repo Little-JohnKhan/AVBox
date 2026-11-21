@@ -88,6 +88,24 @@ object TsFixer {
                 }
             }
 
+            // 跨度合理性检查：PTS 跨度必须约等于「帧数 × 帧时长」。
+            // 实测有源在清单中途让 PTS 回退（分片被拼了两遍/两段独立编码），
+            // 跨度是内容量的两倍（2731s vs 1388s）。这种流「按段平移」会把重复内容接到后面，
+            // 出来就是时长翻倍、播放错乱的坏文件，所以宁可不动。
+            val rawSpan = video.last().dts - video.first().dts
+            val expectSpan = video.size.toLong() * frameTicks
+            if (rawSpan > expectSpan * 13 / 10) {
+                AppLog.e(
+                    TAG + " 放弃：时间轴跨度异常 raw=" + (rawSpan / 90000) + "s expect=" +
+                        (expectSpan / 90000) + "s frames=" + video.size,
+                )
+                return Stat(
+                    video.size, audio.size, gapIndexes.size + 1, frameTicks / 90.0,
+                    gapIndexes.size, maxGap, false,
+                    "源时间轴跨度异常（" + (rawSpan / 90000) + "s vs 内容 " + (expectSpan / 90000) + "s），跳过修复",
+                )
+            }
+
             // 时间轴本来连续：不重写，省掉一次整片读写
             if (gapIndexes.isEmpty()) {
                 AppLog.i(TAG + " 无需修复：时间轴连续 video=" + video.size + " audio=" + audio.size)
@@ -286,6 +304,13 @@ object TsFixer {
             if (audio[j].pts <= audio[j - 1].pts) {
                 return "音频 PTS 非单调 @" + j + " " + audio[j - 1].pts + "→" + audio[j].pts
             }
+        }
+        // 时间跨度也要对得上：视频跨度不能明显超过「帧数 × 帧时长」，
+        // 否则说明段平移把重复内容接成了双倍时长（会产出播放错乱的坏文件）
+        val span = video.last().dts - video.first().dts
+        val expect = video.size.toLong() * frameTicks
+        if (span > expect * 13 / 10) {
+            return "时间跨度异常 span=" + (span / 90000) + "s expect=" + (expect / 90000) + "s"
         }
         return null
     }

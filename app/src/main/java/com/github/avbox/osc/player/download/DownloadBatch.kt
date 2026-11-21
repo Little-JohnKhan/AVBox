@@ -199,6 +199,15 @@ object DownloadBatch {
 
     fun resumeAll(context: Context) {
         TsDownloader.setPausedAll(context, false)
+        // 关键：只清全局标志是不够的。单任务的暂停标记还在 TsDownloader 的 paused 集合里，
+        // 状态仍是 STOPPED，于是 run() 里 awaitOutcome 立刻返回 STOPPED，
+        // 命中「单集暂停 → 整批暂停」的分支，卡片又被按回「已暂停」，后续集也不再推进。
+        // 所以这里要逐个把它们恢复起来。
+        for (task in TsDownloader.snapshot()) {
+            if (task.state == Download.STATE_STOPPED) {
+                scope.launch { TsDownloader.resume(context.applicationContext, task.id) }
+            }
+        }
         for (b in all().filter { it.state == STATE_PAUSED }) save(b.copy(state = STATE_RUNNING))
         resumeRunning(context)
     }
