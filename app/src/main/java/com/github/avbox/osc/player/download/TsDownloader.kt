@@ -633,6 +633,10 @@ object TsDownloader {
             val extinfTicks = Math.round(durations.sum() * 90000.0)
             if (probeBefore != null && extinfTicks > 0 && segPackets.size == durations.size) {
                 val spanTicks = probeBefore.spanMs * 90
+                DownloadLog.write(
+                    "rebuild 判定：PTS 跨度 " + (spanTicks / 90000) + "s / EXTINF 总和 " +
+                        (extinfTicks / 90000) + "s / 分片 " + segPackets.size,
+                )
                 if (spanTicks > extinfTicks * 13 / 10) {
                     DownloadLog.write(
                         "rebuild 触发：PTS 跨度 " + probeBefore.spanMs / 1000 + "s vs EXTINF 总和 " +
@@ -642,6 +646,11 @@ object TsDownloader {
                     DownloadLog.write("rebuild 结果 " + (rb?.toString() ?: "null"))
                     handled = true
                 }
+            } else {
+                DownloadLog.write(
+                    "rebuild 跳过：probe=" + (probeBefore != null) + " extinf=" + (extinfTicks / 90000) +
+                        "s packets=" + segPackets.size + "/" + durations.size,
+                )
             }
             if (!handled) {
                 val stat = TsFixer.fix(target)

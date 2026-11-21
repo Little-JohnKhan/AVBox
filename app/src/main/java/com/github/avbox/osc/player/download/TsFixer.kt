@@ -135,20 +135,49 @@ object TsFixer {
             }
 
             // ---- 音频：套用视频的段平移表，按原 PTS 落段
+            //
+            // 关键补充：**超出视频终点的音频一律丢弃**。
+            // 实测有源只过滤了画面（广告视频分片被删）、音频却完整留着，
+            // 结果视频 22:47、音频 45 分钟，MP4 时长取视频轨看起来正常，
+            // 但播到片尾只剩声音、画面定格。多出来的那段音频就是没删干净的广告。
+            val vEndTick = vDts[video.size - 1] + frameTicks
             val aPts = LongArray(audio.size)
+            val aDrop = BooleanArray(audio.size)
             var lastA = Long.MIN_VALUE
+            var dropped = 0
             for (j in audio.indices) {
                 var v = audio[j].pts + offsetAt(segStart, segOffset, audio[j].pts)
+                if (v >= vEndTick) {
+                    aDrop[j] = true
+                    dropped++
+                    continue
+                }
                 if (v <= lastA) v = lastA + 1
                 aPts[j] = v
                 lastA = v
             }
+            // 安全阀：超界音频超过三分之一，说明段表和音频对不上，
+            // 这时硬砍会把正片声音一起砍掉，宁可保持原样交给下游
+            if (dropped > audio.size / 3) {
+                AppLog.i(TAG + " 超界音频过多（" + dropped + "/" + audio.size + "），跳过丢弃")
+                java.util.Arrays.fill(aDrop, false)
+                dropped = 0
+                lastA = Long.MIN_VALUE
+                for (j in audio.indices) {
+                    var v = audio[j].pts + offsetAt(segStart, segOffset, audio[j].pts)
+                    if (v <= lastA) v = lastA + 1
+                    aPts[j] = v
+                    lastA = v
+                }
+            } else if (dropped > 0) {
+                AppLog.i(TAG + " 丢弃超出视频终点的音频 PES " + dropped + "/" + audio.size)
+            }
 
             val tmpFile = File(file.parentFile, file.name + ".fixtmp")
             tmp = tmpFile
-            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts)
+            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts, aDrop)
 
-            val problem = verify(tmpFile, frameTicks, video.size, audio.size)
+            val problem = verify(tmpFile, frameTicks, video.size, audio.size - dropped)
             if (problem != null) {
                 AppLog.e(TAG + " 自检不通过，放弃修复：" + problem)
                 tmpFile.delete()
@@ -274,7 +303,7 @@ object TsFixer {
 
             val tmpFile = File(file.parentFile, file.name + ".rb")
             tmp = tmpFile
-            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts)
+            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts, BooleanArray(audio.size))
 
             val problem = verifySpan(tmpFile, frameTicks, video.size, audio.size, expectSpan)
             if (problem != null) {
@@ -429,8 +458,17 @@ object TsFixer {
         vDts: LongArray,
         audio: List<PesRef>,
         aPts: LongArray,
+        aDrop: BooleanArray,
     ) {
         val buf = ByteArray(PACKET)
+        val nullPacket = ByteArray(PACKET)
+        nullPacket[0] = 0x47
+        nullPacket[1] = 0x1F
+        nullPacket[2] = 0xFF.toByte()
+        nullPacket[3] = 0x10
+        java.util.Arrays.fill(nullPacket, 4, PACKET, 0xFF.toByte())
+        val audioPid = audio.firstOrNull()?.pid ?: -1
+        var nullUntil = -1
         var packet = 0
         var vi = 0
         var ai = 0
@@ -444,10 +482,20 @@ object TsFixer {
                         if (ref.hasDts) System.arraycopy(encode(vDts[vi]), 0, buf, ref.innerOffset + 5, 5)
                         vi++
                     } else if (ai < audio.size && audio[ai].packet == packet) {
-                        System.arraycopy(encode(aPts[ai]), 0, buf, audio[ai].innerOffset, 5)
+                        if (aDrop[ai]) {
+                            nullUntil = if (ai + 1 < audio.size) audio[ai + 1].packet else Int.MAX_VALUE
+                        } else {
+                            System.arraycopy(encode(aPts[ai]), 0, buf, audio[ai].innerOffset, 5)
+                        }
                         ai++
                     }
-                    out.write(buf, 0, PACKET)
+                    if (packet < nullUntil) {
+                        // 只 null 掉音频 PID 的包，视频包是交错穿插的，一起抹会把视频流切断
+                        val pid = ((buf[1].toInt() and 0x1F) shl 8) or (buf[2].toInt() and 0xFF)
+                        if (pid == audioPid) out.write(nullPacket, 0, PACKET) else out.write(buf, 0, PACKET)
+                    } else {
+                        out.write(buf, 0, PACKET)
+                    }
                     packet++
                 }
             }
