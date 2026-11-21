@@ -113,8 +113,12 @@ class DownloadForegroundService : Service() {
     private var idleSince = 0L
 
     private companion object {
-        /** 空闲宽限期：给「下载完成 → 封装入队 → 转换开始」留出时间 */
-        const val IDLE_GRACE_MS = 8000L
+        /**
+         * 空闲宽限期：给「下载完成 → 封装入队 → 转换开始」以及「解析下一集」留出时间。
+         * 之前只有 8 秒，批量下载在解析下一集时服务就自尽了，之后后台再也拉不起来
+         *（Android 12+ 禁止后台 startForegroundService），表现为「下完一集通知消失、后面几集没通知」。
+         */
+        const val IDLE_GRACE_MS = 120_000L
     }
 
     override fun onCreate() {
@@ -172,7 +176,7 @@ class DownloadForegroundService : Service() {
                 val now = SystemClock.elapsedRealtime()
                 if (idleSince == 0L) idleSince = now
                 if (now - idleSince < IDLE_GRACE_MS) {
-                    DownloadNotifications.notify(this, "离线下载", "收尾中…", 100)
+                    DownloadNotifications.notify(this, "离线下载", "等待封装…", 100)
                     return
                 }
                 stopSelfSafely()

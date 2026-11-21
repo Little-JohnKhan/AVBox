@@ -13,6 +13,7 @@ import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.github.avbox.osc.util.AppLog
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -50,6 +51,21 @@ object Mp4Converter {
         private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * 封装专用线程。
+     *
+     * media3 的 Transformer 把内部调度绑在「创建它的那个 Looper」上，而之前我们是在主线程创建的：
+     * App 一进后台，ColorOS 会给主线程限速，转换就跟着停住（通知还在、进度条卡死），
+     * 只有切回前台才继续。这里给转换单独开一个 HandlerThread，
+     * 转换和进度轮询都不再依赖主线程，后台也能跑完。
+     */
+    private val convertThread by lazy {
+        android.os.HandlerThread("avbox-mp4-convert").apply { start() }
+    }
+    private val convertDispatcher by lazy {
+        convertThread.looper.asCoroutineDispatcher()
+    }
     private val pending = ArrayList<String>()
     private var busy = false
 
@@ -130,10 +146,13 @@ object Mp4Converter {
                 if (!src.isFile || src.length() == 0L) continue
 
                 val dst = File(src.parentFile, src.nameWithoutExtension + ".mp4")
-                // 已经有成品：直接清掉源文件
+                // 同名旧成品存在 = 用户重下了这一集（改了解析/净化之后内容会不一样）。
+                // 必须用新内容替换它，不能走「删掉新 ts 直接跳过」——
+                // 那样用户看到的就是「下载完成了，但本地还是旧文件/没有新文件」。
                 if (dst.isFile && dst.length() > 0L) {
-                    src.delete()
-                    continue
+                    AppLog.i(TAG + " 替换同名旧成品 " + dst.name + " old=" + dst.length() + " new=" + src.length())
+                    DownloadLog.write("convert 替换旧成品 " + dst.name + " old=" + dst.length() + " new=" + src.length())
+                    dst.delete()
                 }
 
                 val temp = File(src.parentFile, src.nameWithoutExtension + PARTIAL_SUFFIX)
@@ -188,7 +207,7 @@ object Mp4Converter {
     }
 
     private suspend fun runTransform(context: Context, src: File, out: File): Boolean {
-        return withContext(Dispatchers.Main) {
+        return withContext(convertDispatcher) {
             try {
                 suspendCancellableCoroutine { cont ->
                     val holder = ProgressHolder()
@@ -198,7 +217,7 @@ object Mp4Converter {
                     // 日志停在某一格不动 = 进程被冻结，日志里出现「停滞」= 转换器自己卡住。
                     var lastPercent = -1
                     var lastChangeAt = System.currentTimeMillis()
-                    val poller = scope.launch {
+                    val poller = scope.launch(convertDispatcher) {
                         while (cont.isActive) {
                             val t = transformer
                             if (t != null &&

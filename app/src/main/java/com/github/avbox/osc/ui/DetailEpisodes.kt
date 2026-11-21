@@ -494,13 +494,9 @@ internal fun DownloadEpisodeSheet(
     if (episodes.isEmpty()) return
     val vodId = info.id ?: ""
 
-    val downloaded = remember(vodId, flag, show) {
-        episodes.indices.filter { index ->
-            val id = DownloadTasks.idOf(vodId, flag, index)
-            TsDownloader.get(id)?.state == Download.STATE_COMPLETED
-        }.toSet()
-    }
-    val downloadable = episodes.indices.filterNot { it in downloaded }
+    // 不再置灰「已下载」：任务表里的记录和磁盘文件不是一回事，用户在文件管理器删掉 mp4 后
+    // 记录还在，选集一直被锁住，只能清 App 数据才能重下。这里一律可选中。
+    val downloadable = episodes.indices.toList()
     var selected by remember(vodId, flag, show) { mutableStateOf<Set<Int>>(emptySet()) }
 
     val groupCount = when {
@@ -570,11 +566,10 @@ internal fun DownloadEpisodeSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 gridItemsIndexed(episodes) { index, ep ->
-                    val isDownloaded = index in downloaded
                     val isSelected = index in selected
                     FilterChip(
                         selected = isSelected,
-                        enabled = !isDownloaded,
+                        enabled = true,
                         onClick = {
                             selected = if (isSelected) selected - index else selected + index
                         },
@@ -583,8 +578,7 @@ internal fun DownloadEpisodeSheet(
                             .height(40.dp),
                         label = {
                             Text(
-                                text = (ep.name ?: ("第 " + (index + 1) + " 集")) +
-                                    if (isDownloaded) " · 已下载" else "",
+                                text = (ep.name ?: ("第 " + (index + 1) + " 集")),
                                 maxLines = 1,
                                 textAlign = TextAlign.Center,
                                 fontSize = 13.sp,

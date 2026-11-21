@@ -66,6 +66,10 @@ object DownloadBatch {
     @Volatile
     private var running = false
 
+    /** 当前协程正在跑哪个批次，用来识别「旧 job 挡路」 */
+    @Volatile
+    private var runningBatchId: String? = null
+
     fun isRunning(): Boolean = running
 
     /** 内存里的最新批次：UI 每秒读它，避免反复反序列化 KV */
@@ -98,8 +102,17 @@ object DownloadBatch {
     @Synchronized
     fun get(id: String): Batch? = all().firstOrNull { it.id == id }
 
-    /** 最新的批次（含已完成），下载页用它展示进度和失败原因 */
-    fun current(): Batch? = memBatch ?: all().firstOrNull()
+    /**
+     * 下载页展示用的批次：优先返回「还在进行的那一个」，全都结束了才退回最新的。
+     *
+     * 之前是 memBatch ?: all().firstOrNull()，而 memBatch 只是「最后一次 save 的批次」。
+     * 多批次并存时，卡片显示的批次和「全部开始」实际操作的批次（activeBatch）可能不是同一个，
+     * 于是出现「下载列表恢复了、批量卡片还停在已暂停，再点一次暂停+开始才恢复」。
+     */
+    fun current(): Batch? {
+        val list = all()
+        return list.firstOrNull { it.state != STATE_DONE } ?: list.firstOrNull() ?: memBatch
+    }
 
     /** 仍在运行的批次（App 启动续跑用） */
     fun activeBatch(): Batch? = all().firstOrNull { it.state != STATE_DONE }
@@ -159,10 +172,21 @@ object DownloadBatch {
         val app = context.applicationContext
         val batch = activeBatch() ?: return
         if (batch.state != STATE_RUNNING) return
-        if (job?.isActive == true) return
+        // 旧协程如果还挂在别的批次上，会挡住新批次推进 —— 先撤掉再重启
+        if (job?.isActive == true) {
+            val runningId = runningBatchId
+            if (runningId != null && runningId != batch.id) {
+                AppLog.i(TAG + " resume: cancel stale job of " + runningId)
+                job?.cancel()
+                job = null
+            } else {
+                return
+            }
+        }
         TsDownloader.setTaskLimit(1)
         Mp4Converter.setBatchMode(true)
         running = true
+        runningBatchId = batch.id
         job = scope.launch { run(app, batch.id) }
     }
 
@@ -190,9 +214,11 @@ object DownloadBatch {
     // ---------- 主循环 ----------
 
     private suspend fun run(context: Context, batchId: String) {
+        runningBatchId = batchId
         try {
             runLoop(context, batchId)
         } finally {
+            if (runningBatchId == batchId) runningBatchId = null
             running = false
         }
     }
