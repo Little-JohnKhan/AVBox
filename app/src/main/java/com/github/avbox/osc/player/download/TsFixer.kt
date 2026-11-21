@@ -320,6 +320,35 @@ object TsFixer {
                 vi++
             }
 
+            // 缺帧统计：源删内容只会整片删，缺口必然落在分片边界上。
+            // 这里把「实际帧数明显少于清单时长应有帧数」的片列出来，
+            // 日志里的秒数可以直接拿去跳着看。
+            run {
+                val expFrames = DoubleArray(segmentPackets.size) {
+                    durations[it] * 90000.0 / frameTicks
+                }
+                val gotFrames = IntArray(segmentPackets.size)
+                for (ref in video) {
+                    val seg = segOf(starts, ref.packet.toLong())
+                    if (seg in gotFrames.indices) gotFrames[seg]++
+                }
+                var bad = 0
+                val detail = StringBuilder()
+                for (i in gotFrames.indices) {
+                    if (expFrames[i] - gotFrames[i] > 2.0) {
+                        bad++
+                        if (bad <= 12) {
+                            val sec = segStart[i] / 90000
+                            detail.append(' ').append(sec / 60).append(':')
+                                .append(String.format(java.util.Locale.US, "%02d", sec % 60))
+                                .append('(').append(gotFrames[i]).append('/')
+                                .append(Math.round(expFrames[i])).append(')')
+                        }
+                    }
+                }
+                DownloadLog.write("rebuild 缺帧分片 n=" + bad + detail)
+            }
+
             // 音频映射：分片内有音频起点就用它做基准；没有的话按上一条音频的
             // 实际增量推进（绝不套用别的分片的基准，否则整片会被压成 1 tick 一条）
             val aDiffs = ArrayList<Long>()

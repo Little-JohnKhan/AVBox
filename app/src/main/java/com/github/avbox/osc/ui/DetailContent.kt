@@ -93,7 +93,6 @@ internal fun DetailContent(
                 onBack = { activity.onBackPressedDispatcher.onBackPressed() },
                 onPlay = { vm.onPlayRequested(DetailPlaybackEntry.PlayCapsule) },
                 onMusic = { activity.openMusicPlayer() },
-                onCast = { activity.openCast() },
                 onCollect = { vm.toggleCollect() },
                 onFollow = { followScheduleOpen = true },
                 onDownload = { downloadSheetOpen = true },

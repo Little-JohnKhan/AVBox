@@ -214,7 +214,6 @@ internal fun DetailHero(
     onBack: () -> Unit,
     onPlay: () -> Unit,
     onMusic: () -> Unit,
-    onCast: () -> Unit,
     onCollect: () -> Unit,
     onFollow: () -> Unit,
     onDownload: () -> Unit,
@@ -295,7 +294,6 @@ internal fun DetailHero(
                     onPlay = onPlay,
                     followed = followed,
                     onMusic = onMusic,
-                    onCast = onCast,
                     onFollow = onFollow,
                     onDownload = onDownload,
                     captionColor = captionColor,
@@ -386,7 +384,6 @@ internal fun DetailHero(
             onPlay = onPlay,
             followed = followed,
             onMusic = onMusic,
-            onCast = onCast,
             onFollow = onFollow,
             onDownload = onDownload,
             captionColor = captionColor,
@@ -448,7 +445,6 @@ private fun DetailHeroInfoBlock(
     onPlay: () -> Unit,
     followed: Boolean,
     onMusic: () -> Unit,
-    onCast: () -> Unit,
     onFollow: () -> Unit,
     onDownload: () -> Unit,
     captionColor: Color,
@@ -503,7 +499,6 @@ private fun DetailHeroInfoBlock(
         DetailActionRow(
             followed = followed,
             onMusic = onMusic,
-            onCast = onCast,
             onFollow = onFollow,
             onDownload = onDownload,
             modifier = Modifier.padding(top = HeroButtonRowSpacing),
@@ -515,7 +510,6 @@ private fun DetailHeroInfoBlock(
 internal fun DetailActionRow(
     followed: Boolean,
     onMusic: () -> Unit,
-    onCast: () -> Unit,
     onFollow: () -> Unit,
     onDownload: () -> Unit,
     modifier: Modifier = Modifier,
@@ -530,12 +524,6 @@ internal fun DetailActionRow(
             contentDescription = stringResource(R.string.detail_music_player),
             selected = false,
             onClick = onMusic,
-        )
-        HeroCircleButton(
-            iconRes = R.drawable.ic_detail_cast,
-            contentDescription = stringResource(R.string.common_cast),
-            selected = false,
-            onClick = onCast,
         )
         HeroCircleButton(
             iconRes = R.drawable.ic_tab_following,

@@ -18,9 +18,13 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.github.avbox.osc.R
+import com.github.avbox.osc.bean.CastVideo
+import com.github.avbox.osc.player.cast.LocalCastServer
 import com.github.avbox.osc.player.download.LocalLibrary
 import com.github.avbox.osc.player.download.LocalVideo
+import com.github.avbox.osc.player.state.CastSheetState
 import com.github.avbox.osc.ui.base.BaseActivity
+import com.github.avbox.osc.ui.player.CastSheet
 import com.github.avbox.osc.util.AppLog
 
 import java.io.File
@@ -37,6 +41,9 @@ class LocalPlayActivity : BaseActivity() {
     private var host: LocalPlaybackHost? = null
     private var videos: List<LocalVideo> = emptyList()
     private var index by mutableStateOf(0)
+
+    /** 投屏设备选择面板；非空时显示 */
+    private var castSheet by mutableStateOf<CastSheetState?>(null)
 
     override fun init() {
         val path = intent.getStringExtra(EXTRA_PATH).orEmpty()
@@ -79,9 +86,7 @@ class LocalPlayActivity : BaseActivity() {
 
             override fun onEpisodes() = Unit
 
-            override fun onCast() {
-                Toast.makeText(this@LocalPlayActivity, "本地文件投屏下个版本接入", Toast.LENGTH_SHORT).show()
-            }
+            override fun onCast() = startCast()
 
             override fun onSwitch(index: Int) = switchTo(index)
         })
@@ -99,13 +104,46 @@ class LocalPlayActivity : BaseActivity() {
                     currentIndex = index,
                     onSelect = { switchTo(it) },
                 )
+                val sheet = castSheet
+                if (sheet != null) {
+                    CastSheet(sheet) {
+                        castSheet = null
+                        // 关掉面板就撤服务：没必要让电视一直能拉到这个文件
+                        LocalCastServer.stop()
+                    }
+                }
             }
         }
         AppLog.i("echo-local-play: " + path + " size=" + file.length() + " files=" + videos.size)
     }
 
+    /**
+     * 本地投屏：先在局域网里把当前文件暴露成 http URL，再交给 DLNA 电视去拉。
+     *
+     * 电视不认识 file:// 路径，这一步绕不开；服务只对当前文件开白名单，
+     * 面板关闭即停服。
+     */
+    private fun startCast() {
+        val video = videos.getOrNull(index) ?: return
+        val url = LocalCastServer.start(video.file)
+        if (url.isNullOrEmpty()) {
+            Toast.makeText(this, "获取局域网地址失败，请确认已连接 Wi-Fi", Toast.LENGTH_LONG).show()
+            return
+        }
+        val position = player?.currentPosition ?: 0L
+        castSheet = CastSheetState(CastVideo(url, video.name, null, position)) {
+            // 电视接管播放，本机停下，避免两边同时出声
+            player?.pause()
+        }
+    }
+
     private fun switchTo(target: Int) {
         if (target < 0 || target >= videos.size) return
+        // 换集就撤掉投屏：旧 URL 指向的是上一集的文件，留着只会让电视拉到错内容
+        if (castSheet != null) {
+            castSheet = null
+            LocalCastServer.stop()
+        }
         index = target
         playAt(target)
     }
@@ -125,6 +163,8 @@ class LocalPlayActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
+        LocalCastServer.stop()
+        castSheet = null
         player?.release()
         player = null
         host = null
