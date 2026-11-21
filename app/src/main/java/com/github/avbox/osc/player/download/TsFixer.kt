@@ -155,14 +155,14 @@ object TsFixer {
             }
             val aPts = LongArray(audio.size)
             var lastA = Long.MIN_VALUE
-            var as = 0
+            var aseg = 0
             for (j in audio.indices) {
-                if (as < aGaps.size && aGaps[as] == j) {
-                    as++
+                if (aseg < aGaps.size && aGaps[aseg] == j) {
+                    aseg++
                     lastA = Long.MIN_VALUE   // 换段：单调保护必须重置，否则整段被压到上一段末尾
                 }
                 val off =
-                    if (bySegment) segOffset[minOf(as, segOffset.size - 1)]
+                    if (bySegment) segOffset[minOf(aseg, segOffset.size - 1)]
                     else offsetAt(segStart, segOffset, audio[j].pts)
                 var v = audio[j].pts + off
                 if (v <= lastA) v = lastA + 1
