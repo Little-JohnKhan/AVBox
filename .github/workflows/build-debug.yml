@@ -3,10 +3,11 @@ name: Build Debug APK
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -53,8 +54,30 @@ jobs:
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: AVBox-debug
           path: app/build/outputs/apk/debug/**/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
+
+      - name: Rename APK for release
+        if: startsWith(github.ref, 'refs/tags/')
+        id: apk
+        run: |
+          set -euo pipefail
+          SRC="$(find app/build/outputs/apk/debug -name '*.apk' | head -n1)"
+          test -f "$SRC" || { echo "::error::apk not found"; exit 1; }
+          OUT="AVBox_${GITHUB_REF_NAME}_debug.apk"
+          cp "$SRC" "$OUT"
+          echo "apk: $OUT"
+          echo "size: $(du -h "$OUT" | cut -f1)"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          prerelease: true
+          generate_release_notes: true
+          files: ${{ steps.apk.outputs.path }}

@@ -125,3 +125,4 @@ logs/
 .deepseek/
 .iso_forensics/
 .tools/
+.key/
