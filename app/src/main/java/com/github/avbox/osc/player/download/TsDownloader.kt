@@ -629,27 +629,24 @@ object TsDownloader {
         //  B. 其它情况：沿用按段平移（补空洞）。
         try {
             var handled = false
-            val probeBefore = TsProbe.scan(target)
             val extinfTicks = Math.round(durations.sum() * 90000.0)
-            if (probeBefore != null && extinfTicks > 0 && segPackets.size == durations.size) {
-                val spanTicks = probeBefore.spanMs * 90
+            // 只要有完整的分片清单，就一律按 EXTINF 重建时间轴。
+            //
+            // 不再用「PTS 跨度 vs EXTINF 总和」当判据：分片是多段独立转码的，
+            // 每段内部 PTS 各自起算，探针看到的总跨度毫无意义（实测报 17s，
+            // 而清单是 1384s），判据因此永远不触发，坏文件被当成好文件放过。
+            // 重建自检不过会自动放弃、保留原文件，所以这里可以激进一些。
+            if (extinfTicks > 0 && segPackets.size == durations.size) {
                 DownloadLog.write(
-                    "rebuild 判定：PTS 跨度 " + (spanTicks / 90000) + "s / EXTINF 总和 " +
-                        (extinfTicks / 90000) + "s / 分片 " + segPackets.size,
+                    "rebuild 判定：EXTINF 总和 " + (extinfTicks / 90000) + "s / 分片 " + segPackets.size,
                 )
-                if (spanTicks > extinfTicks * 13 / 10) {
-                    DownloadLog.write(
-                        "rebuild 触发：PTS 跨度 " + probeBefore.spanMs / 1000 + "s vs EXTINF 总和 " +
-                            (extinfTicks / 90000) + "s",
-                    )
-                    val rb = TsFixer.rebuildByExtinf(target, durations, segPackets)
-                    DownloadLog.write("rebuild 结果 " + (rb?.toString() ?: "null"))
-                    handled = true
-                }
+                val rb = TsFixer.rebuildByExtinf(target, durations, segPackets)
+                DownloadLog.write("rebuild 结果 " + (rb?.toString() ?: "null"))
+                if (rb != null && rb.fixed) handled = true
             } else {
                 DownloadLog.write(
-                    "rebuild 跳过：probe=" + (probeBefore != null) + " extinf=" + (extinfTicks / 90000) +
-                        "s packets=" + segPackets.size + "/" + durations.size,
+                    "rebuild 跳过：extinf=" + (extinfTicks / 90000) + "s packets=" +
+                        segPackets.size + "/" + durations.size,
                 )
             }
             if (!handled) {

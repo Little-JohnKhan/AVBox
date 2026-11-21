@@ -134,6 +134,38 @@ object TsFixer {
                 vPts[i] = video[i].pts + offset
             }
 
+            // ---- 音画起点对齐（头部多余音频）
+            //
+            // 实测现象：源把开头的广告**画面**删了（清单里视频分片没了），音频分片却保留。
+            // 拼成 ts 后视频首帧 PTS ≈ 15s、音频首帧 PTS ≈ 0s；转 mp4 时两条轨各自被
+            // 归一化到 0，于是整片音画差 15 秒，开头那段还只有广告声。
+            // 解法：把「视频首帧之前」的音频整 PES 从文件里剔除（不是填空包），
+            // 让两条轨从同一时刻开始。
+            val vFirstPts = video[0].pts
+            var aSkipTicks = Long.MIN_VALUE
+            if (audio.isNotEmpty() && audio[0].pts + 90000L * 2 < vFirstPts) {
+                aSkipTicks = vFirstPts
+            }
+            var aSkipped = 0
+            if (aSkipTicks != Long.MIN_VALUE) {
+                // 不能用 break 提前收尾：音频 PTS 在同段内可能有毫秒级抖动，
+                // 逐个计数才能和 rewrite 里的剔除条件严格对应
+                for (j in audio.indices) {
+                    if (audio[j].pts < aSkipTicks) aSkipped++
+                }
+                // 极端情况：整条音频都在视频首帧之前（没有可用音频），放弃剔除
+                if (aSkipped >= audio.size) {
+                    aSkipTicks = Long.MIN_VALUE
+                    aSkipped = 0
+                }
+            }
+            if (aSkipped > 0) {
+                AppLog.i(
+                    TAG + " 头部音频剔除 " + aSkipped + "/" + audio.size +
+                        " 视频首帧=" + (vFirstPts / 90000) + "s 音频首帧=" + (audio[0].pts / 90000) + "s",
+                )
+            }
+
             // ---- 音频：按音频自己的回退点切段，段号与视频段号一一对应
             //
             // 只能用段号对应，不能"按时间戳去视频段表里落段"：音频的重置点通常比视频
@@ -175,9 +207,9 @@ object TsFixer {
 
             val tmpFile = File(file.parentFile, file.name + ".fixtmp")
             tmp = tmpFile
-            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts)
+            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts, aSkipTicks)
 
-            val problem = verify(tmpFile, frameTicks, video.size, audio.size)
+            val problem = verify(tmpFile, frameTicks, video.size, audio.size - aSkipped)
             if (problem != null) {
                 AppLog.e(TAG + " 自检不通过，放弃修复：" + problem)
                 tmpFile.delete()
@@ -265,45 +297,56 @@ object TsFixer {
                 if (!firstA.containsKey(seg)) firstA[seg] = ref.pts
             }
 
+            // 视频映射：分片内保留相对偏移，分片间接续。
+            //
+            // 关键：每片强制「新 DTS ≥ 上一帧 DTS + 一帧」。
+            // 清单的 EXTINF 是四舍五入的，23.976fps 下 2.0s 的片实际有 48 帧
+            // （2.002s），347 个片累积下来每个边界都会和上一片重叠 2ms；
+            // 不夹紧的话自检的「DTS 必须递增」会直接判失败，重建等于白做。
             val vPts = LongArray(video.size)
             val vDts = LongArray(video.size)
             var vi = 0
+            var lastVDts = Long.MIN_VALUE
             for (ref in video) {
                 val seg = segOf(starts, ref.packet.toLong())
                 val base = if (seg in segStart.indices) segStart[seg] else 0L
-                val f = firstV[seg]
-                if (f == null) {
-                    vPts[vi] = ref.pts
-                    vDts[vi] = ref.dts
-                } else {
-                    vPts[vi] = base + (ref.pts - f[0])
-                    vDts[vi] = base + (ref.dts - f[1])
-                }
+                val f = if (seg in segStart.indices) firstV[seg] else null
+                var nd = if (f == null) ref.dts else base + (ref.dts - f[1])
+                if (lastVDts != Long.MIN_VALUE && nd < lastVDts + frameTicks) nd = lastVDts + frameTicks
+                vDts[vi] = nd
+                // CTS 偏移（pts-dts）原样保留：B 帧的重排关系不能动，否则解码顺序会乱
+                vPts[vi] = nd + (ref.pts - ref.dts)
+                lastVDts = nd
                 vi++
             }
 
-            // 音频：没有基准的分片沿用最近一个有效基准
+            // 音频映射：分片内有音频起点就用它做基准；没有的话按上一条音频的
+            // 实际增量推进（绝不套用别的分片的基准，否则整片会被压成 1 tick 一条）
+            val aDiffs = ArrayList<Long>()
+            for (i in 1 until audio.size) {
+                val d = audio[i].pts - audio[i - 1].pts
+                if (d > 0) aDiffs.add(d)
+            }
+            aDiffs.sort()
+            val aMed = if (aDiffs.isEmpty()) 3000L else aDiffs[aDiffs.size / 2]
             val aPts = LongArray(audio.size)
             var ai = 0
-            var lastSegWithBase = -1
+            var lastA = Long.MIN_VALUE
             for (ref in audio) {
                 val seg = segOf(starts, ref.packet.toLong())
-                if (firstA.containsKey(seg)) lastSegWithBase = seg
-                val baseSeg = if (firstA.containsKey(seg)) seg else lastSegWithBase
-                if (baseSeg >= 0 && baseSeg < segStart.size) {
-                    val f = firstA[baseSeg] ?: ref.pts
-                    aPts[ai] = segStart[baseSeg] + (ref.pts - f)
-                } else {
-                    aPts[ai] = ref.pts
-                }
+                val f = if (seg in segStart.indices) firstA[seg] else null
+                var v =
+                    if (f != null) segStart[seg] + (ref.pts - f)
+                    else (if (lastA == Long.MIN_VALUE) ref.pts else lastA + aMed)
+                if (lastA != Long.MIN_VALUE && v <= lastA) v = lastA + 1
+                aPts[ai] = v
+                lastA = v
                 ai++
             }
-            // 音频强制单调，避免基准切换造成的微小回退
-            for (j in 1 until aPts.size) if (aPts[j] <= aPts[j - 1]) aPts[j] = aPts[j - 1] + 1
 
             val tmpFile = File(file.parentFile, file.name + ".rb")
             tmp = tmpFile
-            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts)
+            rewrite(file, tmpFile, video, vPts, vDts, audio, aPts, Long.MIN_VALUE)
 
             val problem = verifySpan(tmpFile, frameTicks, video.size, audio.size, expectSpan)
             if (problem != null) {
@@ -364,14 +407,18 @@ object TsFixer {
         if (audio.size != audioCount) return "音频 PES 数不符 " + audio.size + "≠" + audioCount
         for (i in 1 until video.size) {
             val d = video[i].dts - video[i - 1].dts
-            if (d <= 0L || d > frameTicks * 2) return "视频 DTS 间隔异常 " + d
+            // 只要求递增。分片边界出现大间隔是「源删过画面」的真实反映，
+            // 时间轴仍以 EXTINF 为准，硬判失败等于把能用的重建结果丢掉。
+            if (d <= 0L) return "视频 DTS 非递增 " + d
         }
         for (j in 1 until audio.size) {
             if (audio[j].pts < audio[j - 1].pts) return "音频 PTS 非单调 @" + j
         }
         val span = video.last().dts - video.first().dts + frameTicks
-        val diff = Math.abs(span - expectSpan)
-        if (diff > 90000L * 2) {
+        // 容差放宽到 10% + 3s：内容帧数 × 帧间隔与 EXTINF 四舍五入后的总和
+        // 本来就差几秒（23.976fps 尤其明显），卡 2 秒会误杀正常结果
+        val tol = maxOf(90000L * 3, expectSpan / 10)
+        if (Math.abs(span - expectSpan) > tol) {
             return "跨度不符 span=" + (span / 90000) + "s expect=" + (expectSpan / 90000) + "s"
         }
         return null
@@ -458,8 +505,11 @@ object TsFixer {
         vDts: LongArray,
         audio: List<PesRef>,
         aPts: LongArray,
+        aSkipTicks: Long,
     ) {
         val buf = ByteArray(PACKET)
+        val audioPid = audio.firstOrNull()?.pid ?: -1
+        var skipUntil = -1
         var packet = 0
         var vi = 0
         var ai = 0
@@ -473,10 +523,21 @@ object TsFixer {
                         if (ref.hasDts) System.arraycopy(encode(vDts[vi]), 0, buf, ref.innerOffset + 5, 5)
                         vi++
                     } else if (ai < audio.size && audio[ai].packet == packet) {
-                        System.arraycopy(encode(aPts[ai]), 0, buf, audio[ai].innerOffset, 5)
+                        if (aSkipTicks != Long.MIN_VALUE && audio[ai].pts < aSkipTicks) {
+                            // 视频首帧之前的声音（源删了画面没删声音）：整段音频包不写入文件
+                            skipUntil = if (ai + 1 < audio.size) audio[ai + 1].packet else Int.MAX_VALUE
+                        } else {
+                            System.arraycopy(encode(aPts[ai]), 0, buf, audio[ai].innerOffset, 5)
+                        }
                         ai++
                     }
-                    out.write(buf, 0, PACKET)
+                    if (packet < skipUntil) {
+                        val pid = ((buf[1].toInt() and 0x1F) shl 8) or (buf[2].toInt() and 0xFF)
+                        // 只剔除音频 PID 的包；视频包和数据交错在一起，不能一起抹
+                        if (pid != audioPid) out.write(buf, 0, PACKET)
+                    } else {
+                        out.write(buf, 0, PACKET)
+                    }
                     packet++
                 }
             }
