@@ -46,11 +46,22 @@ object LocalCastServer {
     @Volatile
     private var currentFile: File? = null
 
+    /** 已处理的请求数，只用来决定要不要写第一条请求日志 */
+    @Volatile
+    private var served = 0
+
     var port: Int = 0
         private set
 
     /** 起服务并把文件暴露成 URL；失败返回 null */
     fun start(file: File): String? {
+        // 已经在服务同一个文件就直接复用：重复打开面板不能换端口，
+        // 否则电视手里那个旧 URL 会瞬间失效
+        val alive = server
+        if (alive != null && !alive.isClosed && currentFile?.absolutePath == file.absolutePath) {
+            val host = localIpv4()
+            if (host != null) return buildUrl(host, port, file.name)
+        }
         stop()
         if (!file.isFile || file.length() <= 0L) return null
         val host = localIpv4()
@@ -73,7 +84,7 @@ object LocalCastServer {
             isDaemon = true
             start()
         }
-        val url = "http://" + host + ":" + port + "/" + encodeName(file.name)
+        val url = buildUrl(host, port, file.name)
         AppLog.i(TAG + " serve " + file.name + " size=" + file.length() + " -> " + url)
         return url
     }
@@ -91,6 +102,7 @@ object LocalCastServer {
         pool = null
         currentFile = null
         port = 0
+        served = 0
     }
 
     // ---------- 内部 ----------
@@ -131,6 +143,9 @@ object LocalCastServer {
                     if (line.startsWith("Range:", true)) rangeHeader = line.substring(6).trim()
                 }
 
+                if (served == 0) {
+                    AppLog.i(TAG + " first-req " + method + " " + path + " range=" + (rangeHeader ?: "-"))
+                }
                 val file = currentFile
                 if (file == null || !file.isFile) {
                     writeSimple(out, "404 Not Found", "no file")
@@ -148,6 +163,10 @@ object LocalCastServer {
                 }
                 val isHead = method == "HEAD"
                 val range = parseRange(rangeHeader, total)
+                if (served == 0) {
+                    AppLog.i(TAG + " serving total=" + total + " range=" + (if (range == null) "full" else range.joinToString("-")))
+                    served = 1
+                }
                 when {
                     range == null -> {
                         head(out, "HTTP/1.1 200 OK", mimeOf(file), total, null)
@@ -270,6 +289,9 @@ object LocalCastServer {
             if (sb.length > 4096) return sb.toString().trimEnd('\r')
         }
     }
+
+    private fun buildUrl(host: String, port: Int, name: String): String =
+        "http://" + host + ":" + port + "/" + encodeName(name)
 
     /** 文件名进 URL 必须编码，否则中文名会让部分电视直接 4xx */
     private fun encodeName(name: String): String =

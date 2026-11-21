@@ -107,9 +107,10 @@ class LocalPlayActivity : BaseActivity() {
                 val sheet = castSheet
                 if (sheet != null) {
                     CastSheet(sheet) {
+                        // 只关面板，不停服务：投屏成功后这个面板会自己关掉，
+                        // 而那一刻电视才开始拉流——服务停了就是 ERR_CONNECTION_REFUSED。
+                        // 服务由「换集 / 退出播放页」负责回收。
                         castSheet = null
-                        // 关掉面板就撤服务：没必要让电视一直能拉到这个文件
-                        LocalCastServer.stop()
                     }
                 }
             }
