@@ -63,9 +63,8 @@ object Mp4Converter {
     private val convertThread by lazy {
         android.os.HandlerThread("avbox-mp4-convert").apply { start() }
     }
-    private val convertDispatcher by lazy {
-        convertThread.looper.asCoroutineDispatcher()
-    }
+    private val convertHandler by lazy { android.os.Handler(convertThread.looper) }
+    private val convertDispatcher by lazy { convertHandler.asCoroutineDispatcher() }
     private val pending = ArrayList<String>()
     private var busy = false
 
