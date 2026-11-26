@@ -151,6 +151,9 @@ object TsDownloader {
      */
     private const val CONCURRENCY = 8
 
+    /** 单分片超过这个大小就走临时文件，不读内存（有源把整集当一个分片，单片 280MB） */
+    private const val MEM_SEGMENT = 8L * 1024 * 1024
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
 
@@ -556,12 +559,14 @@ object TsDownloader {
 
         var done = startIndex
         var pausedNow = false
+        val spillDir = File(dir, ".sectmp")
+        try {
         FileOutputStream(part, startIndex > 0).use { os ->
             coroutineScope {
                 // 滑动窗口：始终让 CONCURRENCY 个请求在飞，同时预取一批排队，
                 // 某一片慢了只堵住自己，不再拖整批
                 val permits = Semaphore(CONCURRENCY)
-                val inFlight = ArrayList<Deferred<ByteArray>>()
+                val inFlight = ArrayList<Deferred<SegData>>()
                 var next = startIndex
 
                 fun launchOne() {
@@ -569,7 +574,7 @@ object TsDownloader {
                     val i = next++
                     inFlight.add(
                         async(Dispatchers.IO) {
-                            permits.withPermit { fetchSegment(segments[i], task.headers) }
+                            permits.withPermit { fetchSegment(segments[i], task.headers, spillDir) }
                         },
                     )
                 }
@@ -583,11 +588,23 @@ object TsDownloader {
                         pausedNow = true
                         break
                     }
-                    val bytes = inFlight.removeAt(0).await()
-                    os.write(bytes)
+                    val seg = inFlight.removeAt(0).await()
+                    val segSize = seg.size
+                    if (seg.bytes != null) {
+                        os.write(seg.bytes)
+                    } else {
+                        val sp = seg.spill
+                        if (sp != null) {
+                            try {
+                                sp.inputStream().use { it.copyTo(os, 64 * 1024) }
+                            } finally {
+                                sp.delete()
+                            }
+                        }
+                    }
                     os.flush()
-                    written += bytes.size
-                    if (segPackets.size < segments.size) segPackets.add(bytes.size / 188)
+                    written += segSize
+                    if (segPackets.size < segments.size) segPackets.add((segSize / 188L).toInt())
                     done++
                     update(ctx, id) { it.copy(doneSegments = done, bytes = written) }
                     launchOne()
@@ -599,6 +616,10 @@ object TsDownloader {
                 AppLog.i(TAG + " paused at " + done + "/" + segments.size)
                 return
             }
+        }
+        } finally {
+            // 暂停 / 异常 / 正常完成，一律清掉落盘的临时分片
+            spillDir.deleteRecursively()
         }
 
         // 收尾：.part 改名成 .ts，公开目录里直接就是一个能播的成品文件
@@ -862,11 +883,26 @@ object TsDownloader {
         }
     }
 
-    private suspend fun fetchSegment(url: String, headers: Map<String, String>?): ByteArray {
+    /**
+     * 分片数据：小片留在内存（快），大片落临时文件（内存恒定）。
+     *
+     * 实测有源把整集当成一个分片，单片 280MB。原来是 body.bytes() 整片读进内存，
+     * 再叠上 8 路并发预取，堆直接爆：
+     * Failed to allocate a 293823112 byte allocation with 49753952 free
+     */
+    private class SegData(val bytes: ByteArray?, val spill: File?) {
+        val size: Long get() = bytes?.size?.toLong() ?: (spill?.length() ?: 0L)
+    }
+
+    private suspend fun fetchSegment(
+        url: String,
+        headers: Map<String, String>?,
+        spillDir: File,
+    ): SegData {
         var last: Throwable? = null
         for (attempt in 1..3) {
             try {
-                return httpBytes(url, headers)
+                return httpSegment(url, headers, spillDir)
             } catch (th: Throwable) {
                 last = th
                 AppLog.e(TAG, "segment attempt=" + attempt + " " + url.take(120), th)
@@ -877,31 +913,71 @@ object TsDownloader {
     }
 
     /**
-     * 整片读进内存再交给调用方写盘，避免重试时把半片数据重复写进文件。
+     * 取一个分片。首字节必须是 0x47（TS 包同步字节），否则说明源站返回的是占位图/HTML，
+     * 在这里就报错，而不是等用户播放时才发现文件是坏的。
      *
-     * 首字节必须是 0x47（TS 包同步字节），否则直接报错——源站返回占位图/HTML
-     * 时会在这里暴露，而不是等用户播放时才发现文件是坏的。
+     * 小分片（≤ MEM_SEGMENT）读内存，够快也能整片校验；
+     * 大分片流式写临时文件，只保留 64KB 缓冲——否则单片就能吃掉整个堆。
      */
-    private fun httpBytes(url: String, headers: Map<String, String>?): ByteArray {
+    private fun httpSegment(url: String, headers: Map<String, String>?, spillDir: File): SegData {
         client.newCall(buildRequest(url, headers)).execute().use { resp ->
             if (!resp.isSuccessful) throw IOException("分片 HTTP " + resp.code)
             val body = resp.body ?: throw IOException("分片空响应")
-            val bytes = body.bytes()
-            if (bytes.isEmpty()) throw IOException("分片为空")
-            val first = bytes[0].toInt() and 0xFF
-            if (first != 0x47) {
-                throw IOException("不是 TS 分片（首字节 0x" + Integer.toHexString(first) + "）")
+            val len = body.contentLength()
+            body.byteStream().use { input ->
+                if (len >= 1L && len <= MEM_SEGMENT) {
+                    return SegData(alignSeg(input.readBytes(), url), null)
+                }
+                spillDir.mkdirs()
+                val spill = File(spillDir, "seg-" + System.nanoTime() + ".tmp")
+                var total = 0L
+                var first = -1
+                try {
+                    FileOutputStream(spill).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n <= 0) break
+                            if (first < 0) first = buf[0].toInt() and 0xFF
+                            out.write(buf, 0, n)
+                            total += n
+                        }
+                    }
+                } catch (th: Throwable) {
+                    spill.delete()
+                    throw th
+                }
+                if (total <= 0L) {
+                    spill.delete()
+                    throw IOException("分片为空")
+                }
+                if (first != 0x47) {
+                    spill.delete()
+                    throw IOException("不是 TS 分片（首字节 0x" + Integer.toHexString(first) + "）")
+                }
+                val rem = (total % 188L).toInt()
+                if (rem != 0) {
+                    DownloadLog.write("segment 残缺 " + rem + " 字节已截断 " + url.substringAfterLast('/').take(40))
+                    truncateTo(spill, total - rem)
+                }
+                return SegData(null, spill)
             }
-            // 源站偶尔给出残缺分片（末尾多／少几个字节）。TS 是固定 188 字节一个包，
-            // 一旦不对齐，拼进整片后后面所有包都会错位，播放器只能边找同步字边丢帧
-            // —— 表现就是「画面一卡一卡」。这里把尾巴的残字节切掉。
-            val rem = bytes.size % 188
-            if (rem != 0) {
-                DownloadLog.write("segment 残缺 " + rem + " 字节已截断 " + url.substringAfterLast('/').take(40))
-                return bytes.copyOf(bytes.size - rem)
-            }
-            return bytes
         }
+    }
+
+    /** 整片校验 + 尾巴按 188 对齐截断（内存版） */
+    private fun alignSeg(bytes: ByteArray, url: String): ByteArray {
+        if (bytes.isEmpty()) throw IOException("分片为空")
+        val first = bytes[0].toInt() and 0xFF
+        if (first != 0x47) {
+            throw IOException("不是 TS 分片（首字节 0x" + Integer.toHexString(first) + "）")
+        }
+        val rem = bytes.size % 188
+        if (rem != 0) {
+            DownloadLog.write("segment 残缺 " + rem + " 字节已截断 " + url.substringAfterLast('/').take(40))
+            return bytes.copyOf(bytes.size - rem)
+        }
+        return bytes
     }
 
     // ---------- 内部工具 ----------
