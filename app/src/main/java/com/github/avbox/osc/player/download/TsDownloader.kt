@@ -34,6 +34,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.io.IOException
+import java.io.InputStream
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -153,6 +154,9 @@ object TsDownloader {
 
     /** 单分片超过这个大小就走临时文件，不读内存（有源把整集当一个分片，单片 280MB） */
     private const val MEM_SEGMENT = 8L * 1024 * 1024
+
+    /** 清单文本上限：正常 m3u8 几百 KB，2MB 已经非常宽松 */
+    private const val TEXT_LIMIT = 2 * 1024 * 1024
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
@@ -508,7 +512,14 @@ object TsDownloader {
             return
         }
 
-        val playlist = fetchSegments(task)
+        val playlist = try {
+            fetchSegments(task)
+        } catch (th: NotPlaylistException) {
+            // 地址没有扩展名、服务器直接给了视频文件：退化成整段流式下载
+            DownloadLog.write("不是清单，转直链下载 " + task.episodeName + "：" + th.message)
+            runSingleFile(ctx, task, ".mp4", id)
+            return
+        }
         val segments = playlist.urls
         if (segments.isEmpty()) throw IOException("清单里没有分片")
         val durations = playlist.durations
@@ -768,6 +779,14 @@ object TsDownloader {
 
     private class Playlist(val urls: List<String>, val durations: List<Double>)
 
+    /**
+     * 服务器返回的不是 m3u8 清单。
+     *
+     * 对象存储直链（hash 命名、无扩展名）很常见：URL 看不出是视频还是清单，
+     * 只能请求一次才知道。这时绝不能把响应当文本读——它是几百 MB 的视频本身。
+     */
+    private class NotPlaylistException(msg: String) : IOException(msg)
+
     private fun fetchSegments(task: TsTask): Playlist {
         var base = task.playUrl
         var content = httpText(base, task.headers)
@@ -875,12 +894,38 @@ object TsDownloader {
         return builder.build()
     }
 
+    /**
+     * 取清单文本。
+     *
+     * 绝不能 body.bytes()：服务器把整集视频当响应返回时（对象存储 hash 直链），
+     * 一次分配 280MB 直接 OOM。这里限制读取量，并校验 #EXTM3U 头，
+     * 不是清单就抛 NotPlaylistException 交给上层改走直链下载。
+     */
     private fun httpText(url: String, headers: Map<String, String>?): String {
         client.newCall(buildRequest(url, headers)).execute().use { resp ->
             if (!resp.isSuccessful) throw IOException("清单 HTTP " + resp.code)
             val body = resp.body ?: throw IOException("清单空响应")
-            return body.bytes().toString(Charsets.UTF_8)
+            val len = body.contentLength()
+            if (len > TEXT_LIMIT) throw NotPlaylistException("响应 " + len + " 字节，不是清单")
+            val text = body.byteStream().use { readLimited(it, TEXT_LIMIT) }
+            if (!text.contains("#EXTM3U")) {
+                throw NotPlaylistException("响应 " + text.length + " 字符且不含 #EXTM3U")
+            }
+            return text
         }
+    }
+
+    /** 最多读 limit 字节，超出部分丢掉（不读满，避免把大文件拖下来） */
+    private fun readLimited(input: InputStream, limit: Int): String {
+        val buf = ByteArray(8 * 1024)
+        val out = java.io.ByteArrayOutputStream()
+        while (out.size() < limit) {
+            val want = minOf(buf.size, limit - out.size())
+            val n = input.read(buf, 0, want)
+            if (n <= 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray().toString(Charsets.UTF_8)
     }
 
     /**
