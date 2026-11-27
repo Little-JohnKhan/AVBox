@@ -72,6 +72,33 @@ jobs:
           echo "size: $(du -h "$OUT" | cut -f1)"
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
+      - name: Read tag message
+        if: startsWith(github.ref, 'refs/tags/')
+        id: tagmsg
+        run: |
+          set -euo pipefail
+          MSG="$(git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/${GITHUB_REF_NAME}" | sed '/^[[:space:]]*$/d' || true)"
+          if [ -z "$MSG" ]; then
+            MSG="详见提交记录。"
+          fi
+          {
+            echo 'body<<__EOF__'
+            printf '### 本次更新
+
+%s
+
+' "$MSG"
+            printf '### 说明
+
+'
+            printf 'AVBox 个人修改版（debug 构建）。改动细节见 [README 的「本分支的改动」](https://github.com/%s#本分支的改动)，技术细节见 [改动总览](https://github.com/%s/blob/main/docs/AVBox-changes.md)。
+
+' "$GITHUB_REPOSITORY" "$GITHUB_REPOSITORY"
+            printf 'debug 签名，可直接覆盖安装；不包含任何影视内容与内容源，仅供学习研究。
+'
+            echo '__EOF__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
@@ -79,5 +106,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           prerelease: true
-          generate_release_notes: true
+          generate_release_notes: false
+          body: ${{ steps.tagmsg.outputs.body }}
           files: ${{ steps.apk.outputs.path }}
