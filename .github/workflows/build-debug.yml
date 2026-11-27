@@ -77,25 +77,26 @@ jobs:
         id: tagmsg
         run: |
           set -euo pipefail
-          MSG="$(git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/${GITHUB_REF_NAME}" | sed '/^[[:space:]]*$/d' || true)"
-          if [ -z "$MSG" ]; then
-            MSG="详见提交记录。"
+          SUBJECT="$(git for-each-ref --format='%(contents:subject)' "refs/tags/${GITHUB_REF_NAME}")"
+          DETAIL="$(git for-each-ref --format='%(contents:body)' "refs/tags/${GITHUB_REF_NAME}")"
+          if [ -z "$SUBJECT" ]; then
+            SUBJECT="详见提交记录。"
           fi
           {
             echo 'body<<__EOF__'
-            printf '### 本次更新
-
-%s
-
-' "$MSG"
-            printf '### 说明
-
-'
-            printf 'AVBox 个人修改版（debug 构建）。改动细节见 [README 的「本分支的改动」](https://github.com/%s#本分支的改动)，技术细节见 [改动总览](https://github.com/%s/blob/main/docs/AVBox-changes.md)。
-
-' "$GITHUB_REPOSITORY" "$GITHUB_REPOSITORY"
-            printf 'debug 签名，可直接覆盖安装；不包含任何影视内容与内容源，仅供学习研究。
-'
+            echo '### 本次更新'
+            echo ''
+            echo "$SUBJECT"
+            if [ -n "$DETAIL" ]; then
+              echo ''
+              echo "$DETAIL"
+            fi
+            echo ''
+            echo '### 说明'
+            echo ''
+            echo "AVBox 个人修改版（debug 构建）。改动细节见 [README 的「本分支的改动」](https://github.com/$GITHUB_REPOSITORY#本分支的改动)，技术细节见 [改动总览](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/AVBox-changes.md)。"
+            echo ''
+            echo 'debug 签名，可直接覆盖安装；不包含任何影视内容与内容源，仅供学习研究。'
             echo '__EOF__'
           } >> "$GITHUB_OUTPUT"
 
